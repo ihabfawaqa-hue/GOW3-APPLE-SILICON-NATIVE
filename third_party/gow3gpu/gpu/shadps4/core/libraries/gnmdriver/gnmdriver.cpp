@@ -2394,7 +2394,7 @@ extern "C" int gow3gpu_wait_idle() {
     if (!liverpool) {
         return -1;
     }
-    liverpool->WaitGpuIdle();
+    liverpool->WaitGpuWorkRetired();
     return 0;
 }
 

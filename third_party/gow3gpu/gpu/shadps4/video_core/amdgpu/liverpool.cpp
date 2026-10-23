@@ -208,6 +208,7 @@ void Liverpool::Process(std::stop_token stoken) {
             if (num_submits == 0) {
                 work_retired = true;
             }
+            submit_cv.notify_all();
         }
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
     }

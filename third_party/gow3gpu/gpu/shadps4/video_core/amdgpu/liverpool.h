@@ -112,6 +112,13 @@ public:
         submit_cv.wait(lk, [this] { return num_submits == 0; });
     }
 
+    // Unlike WaitGpuIdle, this also waits for the draw-recording pipe and deferred
+    // Vulkan signals to finish using guest submission buffers.
+    void WaitGpuWorkRetired() noexcept {
+        std::unique_lock lk{submit_mutex};
+        submit_cv.wait(lk, [this] { return num_submits == 0 && work_retired; });
+    }
+
     /// gow3: also the draw recording thread and the fences it deferred are done (see
     /// work_retired). sceGnmSubmitDone does not block the guest when this is true.
     bool IsGpuIdle() const {

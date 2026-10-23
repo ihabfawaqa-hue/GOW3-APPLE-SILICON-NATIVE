@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "gow3gpu_runtime_adapter.h"
+#include "gow3gpu_gnm_adapter.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -18,6 +19,10 @@ static int g_unmap_count;
 static int g_invalidate_count;
 static uint64_t g_last_address;
 static uint64_t g_last_size;
+static const uint32_t *g_submitted_dcb;
+static const uint32_t *g_submitted_ccb;
+static int g_submit_calls;
+static int g_submit_done_calls;
 
 uint64_t sceKernelGetProcessTime(void) { return 123456; }
 uint64_t sceKernelGetProcessTimeCounter(void) { return 654321; }
@@ -72,6 +77,28 @@ static int fail(const char *message) {
   fprintf(stderr, "runtime adapter smoke failed: %s\n", message);
   return 1;
 }
+
+static int32_t fake_submit(uint32_t count, const uint32_t **dcb_addresses,
+                           uint32_t *dcb_sizes, const uint32_t **ccb_addresses,
+                           uint32_t *ccb_sizes) {
+  if (count != 1 || !dcb_addresses || !dcb_sizes || dcb_sizes[0] != 8 ||
+      !dcb_addresses[0] || dcb_addresses[0][0] != 0xc0001000u ||
+      dcb_addresses[0][1] != 0 || !ccb_addresses || !ccb_sizes ||
+      ccb_sizes[0] != 8 || !ccb_addresses[0] ||
+      ccb_addresses[0][0] != 0xc0001000u || ccb_addresses[0][1] != 0)
+    return (int32_t)0x80d11000u;
+  g_submitted_dcb = dcb_addresses[0];
+  g_submitted_ccb = ccb_addresses[0];
+  g_submit_calls++;
+  return 0;
+}
+
+static int32_t fake_submit_done(void) {
+  g_submit_done_calls++;
+  return 0;
+}
+
+static int32_t fake_wait_idle(void) { return 0; }
 
 int main(void) {
   const size_t memory_size = 0x50000;
@@ -194,8 +221,44 @@ int main(void) {
       ps4_gow3gpu_dispatch_fault(NULL, NULL) != 0)
     return fail("GPU fault dispatch");
 
+  /* Exercise the actual GuestContext register layout and guest-VA arrays used
+   * by shim_sceGnmSubmitCommandBuffers, with the candidate's raw HLE callback
+   * replaced by an ABI-checking test function. */
+  const uint64_t dcb_guest_va = 0x31000;
+  const uint64_t ccb_guest_va = 0x31100;
+  const uint32_t nop_packet[2] = {0xc0001000u, 0};
+  const uint64_t dcb_address_array[1] = {dcb_guest_va};
+  const uint64_t ccb_address_array[1] = {ccb_guest_va};
+  const uint32_t buffer_size_array[1] = {sizeof(nop_packet)};
+  memcpy(memory + 0x30000, dcb_address_array, sizeof(dcb_address_array));
+  memcpy(memory + 0x30020, buffer_size_array, sizeof(buffer_size_array));
+  memcpy(memory + 0x30030, ccb_address_array, sizeof(ccb_address_array));
+  memcpy(memory + 0x30040, buffer_size_array, sizeof(buffer_size_array));
+  memcpy(memory + dcb_guest_va, nop_packet, sizeof(nop_packet));
+  memcpy(memory + ccb_guest_va, nop_packet, sizeof(nop_packet));
+  ctx.rdi = 1;
+  ctx.rsi = 0x30000;
+  ctx.rdx = 0x30020;
+  ctx.rcx = 0x30030;
+  ctx.r8 = 0x30040;
+  if (ps4_gow3gpu_submit_from_context(&ctx, &g_memory_api, fake_submit) != 0 ||
+      g_submit_calls != 1 || ps4_gow3gpu_retained_command_bytes() != 16)
+    return fail("GuestContext GNM submit marshalling");
+  memset(memory + dcb_guest_va, 0, sizeof(nop_packet));
+  memset(memory + ccb_guest_va, 0, sizeof(nop_packet));
+  if (g_submitted_dcb[0] != 0xc0001000u || g_submitted_ccb[0] != 0xc0001000u)
+    return fail("submitted PM4 copy lifetime");
+  if (ps4_gow3gpu_submit_done(fake_submit_done, fake_wait_idle) != 0 ||
+      g_submit_done_calls != 1 || ps4_gow3gpu_retained_command_bytes() != 0)
+    return fail("submit-done retained-buffer release");
+
+  ctx.rsi = 0x31ffc; /* address array would cross into the uncommitted tail */
+  if (ps4_gow3gpu_submit_from_context(&ctx, &g_memory_api, fake_submit) == 0 ||
+      g_submit_calls != 1)
+    return fail("reject unmapped GNM address array");
+
   pthread_mutex_destroy(&ctx.vm_mutex);
   munmap(memory, memory_size);
-  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
+  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
   return 0;
 }

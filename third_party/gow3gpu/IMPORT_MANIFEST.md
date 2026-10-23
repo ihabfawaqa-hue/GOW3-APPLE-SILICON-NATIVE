@@ -52,6 +52,7 @@ These are local port patches in the isolated branch, not upstream commits. They 
 | Area | Local adaptation |
 |---|---|
 | CMake/platform | Avoid Linux X11 discovery on Apple; search the pinned VMA header; accommodate Homebrew's imported `Zycore::Zycore` target; use Mach-O dynamic lookup for host callbacks |
+| Test target portability | Restrict the live cheat-hook executable test (Windows `VirtualAlloc` plus x86-64 machine code) to 64-bit Windows so it does not break the native macOS/arm64 default build |
 | CPU relax/timing | Add `common/host_timing.h`; replace x86 pause/TSC assumptions in the affected Vulkan worker paths with an ARM-compatible relax hint and monotonic nanoseconds |
 | Host thread identity | Add `common/thread_id.h`; avoid Linux/Windows-only thread ID APIs in Liverpool logging and rasterizer checks |
 | Runtime logging/threads | Use Mach-O-safe thread names, Apple CPU-count/QoS APIs, and ARM64 ucontext register extraction in the guest-write logger |
@@ -66,6 +67,7 @@ No local workaround removes a renderer-required robustness feature. The M2 probe
 | Check | Result |
 |---|---|
 | Full standalone `gow3gpu` CMake target | PASS: all target translation units compiled and the shared library linked |
+| Default CMake build on macOS/arm64 | PASS: after restricting the Windows/x86-64-only cheat-hook test to its supported platform, `cmake --build /tmp/gow3_gpu_import_cmake --parallel 4` completes |
 | Library architecture | PASS: `/tmp/gow3_gpu_import_cmake/libgow3gpu.dylib` is Mach-O arm64 |
 | Expected C exports | PASS: `gow3gpu_init`, `gow3gpu_register_kernel`, `gow3gpu_resolve`, `gow3gpu_handle_fault`, and `gow3gpu_symbol_count` are exported |
 | ABI registration smoke | PASS: test loader registered 43 kernel/AVPlayer symbols, resolved `D0OdFMjp46I` (`sceKernelCreateEqueue`), and returned zero for an unknown NID |

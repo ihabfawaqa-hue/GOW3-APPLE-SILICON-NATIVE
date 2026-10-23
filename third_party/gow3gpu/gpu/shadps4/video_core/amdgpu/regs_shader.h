@@ -3,8 +3,14 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstring>
+#include <optional>
+#include <span>
+#include <vector>
 #include "common/assert.h"
 #include "common/types.h"
+#include "core/memory.h"
 #include "shader_recompiler/params.h"
 
 namespace AmdGpu {
@@ -76,6 +82,10 @@ struct ShaderProgram {
     template <typename T = u8*>
     const T Address() const {
         return std::bit_cast<T>(address << 8);
+    }
+
+    [[nodiscard]] VAddr AddressValue() const noexcept {
+        return address << 8;
     }
 
     [[nodiscard]] u32 NumVgprs() const {
@@ -207,6 +217,10 @@ struct ComputeProgram {
         return std::bit_cast<T>(address << 8);
     }
 
+    [[nodiscard]] VAddr AddressValue() const noexcept {
+        return address << 8;
+    }
+
     u32 SharedMemSize() const noexcept {
         // lds_dwords is in units of 128 dwords. We return bytes.
         return settings.lds_dwords * 128 * 4;
@@ -221,33 +235,50 @@ struct ComputeProgram {
     }
 };
 
-static constexpr const BinaryInfo& SearchBinaryInfo(const u32* code) {
+static std::optional<BinaryInfo> SearchBinaryInfo(std::span<const u32> code) {
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
-    if (code[0] == token_mov_vcchi) {
-        const auto* info = std::bit_cast<const BinaryInfo*>(code + (code[1] + 1) * 2);
-        if (info->Valid()) {
-            return *info;
+    const auto read_info = [&](std::size_t dword_offset) -> std::optional<BinaryInfo> {
+        const std::size_t byte_offset = dword_offset * sizeof(u32);
+        if (byte_offset > code.size_bytes() ||
+            sizeof(BinaryInfo) > code.size_bytes() - byte_offset) {
+            return std::nullopt;
+        }
+        BinaryInfo info{};
+        std::memcpy(&info, reinterpret_cast<const u8*>(code.data()) + byte_offset,
+                    sizeof(info));
+        return info.Valid() ? std::optional{info} : std::nullopt;
+    };
+    if (code.size() >= 2 && code[0] == token_mov_vcchi) {
+        if (auto info = read_info((code[1] + 1) * 2)) {
+            return info;
         }
     }
-    constexpr u32 signature_size = sizeof(BinaryInfo::signature_ref) / sizeof(u8);
     constexpr u32 search_limit = 0x4000;
-    const u32* end = code + search_limit;
-    for (const u32* it = code; it < end; ++it) {
-        if (const BinaryInfo* info = std::bit_cast<const BinaryInfo*>(it); info->Valid()) {
-            return *info;
+    const std::size_t count = std::min<std::size_t>(code.size(), search_limit);
+    for (std::size_t offset = 0; offset < count; ++offset) {
+        if (auto info = read_info(offset)) {
+            return info;
         }
     }
-    UNREACHABLE_MSG("Shader binary info not found.");
+    return std::nullopt;
 }
 
-static constexpr Shader::ShaderParams GetParams(const auto& sh) {
-    const auto* code = sh.template Address<u32*>();
-    const auto& bininfo = SearchBinaryInfo(code);
-    return {
-        .user_data = sh.user_data,
-        .code = std::span{code, bininfo.length / sizeof(u32)},
-        .hash = bininfo.shader_hash,
-    };
+static Shader::ShaderParams GetParams(const auto& sh) {
+    constexpr std::size_t max_shader_words = 0x4000;
+    const VAddr base = sh.AddressValue();
+    auto code = std::make_shared<std::vector<u32>>(max_shader_words);
+    if (!Core::Memory::Instance()->CopySparseMemory(
+            base, reinterpret_cast<u8*>(code->data()), code->size() * sizeof(u32))) {
+        return {sh.user_data, {}, 0, base};
+    }
+    const auto bininfo = SearchBinaryInfo(*code);
+    if (!bininfo || bininfo->length == 0 || bininfo->length % sizeof(u32) != 0 ||
+        bininfo->length > code->size() * sizeof(u32)) {
+        return {sh.user_data, {}, 0, base};
+    }
+    code->resize(bininfo->length / sizeof(u32));
+    const std::span<const u32> shader_code{*code};
+    return Shader::ShaderParams{sh.user_data, shader_code, bininfo->shader_hash, base, code};
 }
 
 } // namespace AmdGpu

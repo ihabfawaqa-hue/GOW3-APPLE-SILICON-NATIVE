@@ -4,9 +4,11 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <unordered_map>
 #include <shared_mutex>
 #include <variant>
+#include <vector>
 #include <boost/container/static_vector.hpp>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
@@ -95,6 +97,8 @@ namespace Vulkan {
 struct PipelineSelection {
     const AmdGpu::Regs* regs{};
     std::array<Shader::RuntimeInfo, MaxShaderStages> runtime_infos{};
+    // Geometry runtime metadata stores a span; retain the checked snapshot here.
+    std::shared_ptr<const std::vector<u32>> geometry_copy_storage;
     std::array<const Shader::Info*, MaxShaderStages> infos{};
     std::array<vk::ShaderModule, MaxShaderStages> modules{};
     std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};

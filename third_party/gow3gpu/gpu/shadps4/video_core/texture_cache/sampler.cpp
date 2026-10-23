@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <limits>
+#include <optional>
+#include "core/memory.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/texture_cache/sampler.h"
@@ -24,12 +29,27 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
         border_color = vk::BorderColor::eFloatOpaqueBlack;
     }
 
+    std::array<float, 4> custom_border_color_array{};
+    if (border_color == vk::BorderColor::eFloatCustomEXT) {
+        const auto base = border_color_base.Address<VAddr>();
+        const auto offset = static_cast<VAddr>(sampler.border_color_ptr.Value()) *
+                            sizeof(custom_border_color_array);
+        const bool valid_address = base <= std::numeric_limits<VAddr>::max() - offset;
+        if (!valid_address || !Core::Memory::Instance()->CopySparseMemory(
+                                  base + offset,
+                                  reinterpret_cast<u8*>(custom_border_color_array.data()),
+                                  sizeof(custom_border_color_array))) {
+            static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+            if (!reported.test_and_set(std::memory_order_relaxed)) {
+                LOG_ERROR(Render_Vulkan,
+                          "Invalid guest custom border color, falling back to black");
+            }
+            border_color = vk::BorderColor::eFloatOpaqueBlack;
+        }
+    }
+
     const auto custom_color = [&]() -> std::optional<vk::SamplerCustomBorderColorCreateInfoEXT> {
         if (border_color == vk::BorderColor::eFloatCustomEXT) {
-            const auto border_color_index = sampler.border_color_ptr.Value();
-            const auto border_color_buffer = border_color_base.Address<std::array<float, 4>*>();
-            const auto custom_border_color_array = border_color_buffer[border_color_index];
-
             const vk::SamplerCustomBorderColorCreateInfoEXT ret{
                 .customBorderColor =
                     vk::ClearColorValue{

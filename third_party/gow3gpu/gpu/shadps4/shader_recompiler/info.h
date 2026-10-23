@@ -3,11 +3,15 @@
 
 #pragma once
 
+#include <cstring>
+#include <limits>
+#include <memory>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
 #include "common/assert.h"
 #include "common/types.h"
+#include "core/memory.h"
 #include "shader_recompiler/backend/bindings.h"
 #include "shader_recompiler/frontend/copy_shader.h"
 #include "shader_recompiler/frontend/tessellation.h"
@@ -118,6 +122,8 @@ struct Info : InfoPersistent {
     };
 
     std::span<const u32> user_data;
+    // Keeps the checked guest-memory snapshot behind params.code alive for cache users.
+    std::shared_ptr<const std::vector<u32>> code_storage;
     std::vector<u32> flattened_ud_buf;
     PersistentSrtInfo srt_info;
 
@@ -156,8 +162,8 @@ struct Info : InfoPersistent {
 
     Info() = default;
     Info(HwStage stage_, SwStage l_stage_, ShaderParams params)
-        : InfoPersistent(stage_, l_stage_, params.hash), pgm_base{params.Base()},
-          user_data{params.user_data} {}
+        : InfoPersistent(stage_, l_stage_, params.hash), user_data{params.user_data},
+          code_storage{std::move(params.code_storage)}, pgm_base{params.Base()} {}
 
     /// gow3: user data of this stage as a draw saw it. The GPU command thread refreshes
     /// user_data/flattened_ud_buf for every draw it decodes, while the draw recording thread
@@ -209,14 +215,30 @@ struct Info : InfoPersistent {
 
     template <typename T>
     T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
-        T data;
+        T data{};
         const auto ud = UserData();
-        const u32* base = ud.data();
-        if (ptr_index != IR::NumScalarRegs) {
-            std::memcpy(&base, &ud[ptr_index], sizeof(base));
-            base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+        const u64 byte_offset = u64(dword_offset) * sizeof(u32);
+        if (ptr_index == IR::NumScalarRegs) {
+            if (byte_offset > ud.size_bytes() || sizeof(T) > ud.size_bytes() - byte_offset) {
+                return data;
+            }
+            std::memcpy(&data, reinterpret_cast<const u8*>(ud.data()) + byte_offset, sizeof(T));
+            return data;
         }
-        std::memcpy(&data, base + dword_offset, sizeof(T));
+
+        if (ptr_index >= ud.size() || sizeof(VAddr) > ud.size_bytes() - ptr_index * sizeof(u32)) {
+            return data;
+        }
+        VAddr base_address{};
+        std::memcpy(&base_address, &ud[ptr_index], sizeof(base_address));
+        base_address &= 0xFFFFFFFFFFFFULL;
+        if (base_address > std::numeric_limits<VAddr>::max() - byte_offset) {
+            return data;
+        }
+        if (!Core::Memory::Instance()->CopySparseMemory(
+                base_address + byte_offset, reinterpret_cast<u8*>(&data), sizeof(T))) {
+            data = {};
+        }
         return data;
     }
 
@@ -251,9 +273,11 @@ struct Info : InfoPersistent {
         auto buf = ReadUdReg<AmdGpu::Buffer>(static_cast<u32>(tess_consts_ptr_base),
                                              static_cast<u32>(tess_consts_dword_offset));
         VAddr tess_constants_addr = buf.base_address;
-        memcpy(&tess_constants,
-               reinterpret_cast<TessellationDataConstantBuffer*>(tess_constants_addr),
-               sizeof(tess_constants));
+        if (!Core::Memory::Instance()->CopySparseMemory(
+                tess_constants_addr, reinterpret_cast<u8*>(&tess_constants),
+                sizeof(tess_constants))) {
+            tess_constants = {};
+        }
     }
 
     void Serialize(Serialization::Archive& ar) const;

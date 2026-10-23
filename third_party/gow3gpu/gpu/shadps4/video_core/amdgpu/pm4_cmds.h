@@ -428,11 +428,10 @@ struct PM4CmdEventWrite {
     };
     u32 address[];
 
-    template <typename T>
-    T Address() const {
+    VAddr AddressValue() const {
         ASSERT(event_index.Value() >= EventIndex::ZpassDone &&
                event_index.Value() <= EventIndex::SampleStreamoutStatSx);
-        return std::bit_cast<T>((u64(address[1]) << 32u) | u64(address[0]));
+        return (u64(address[1]) << 32u) | u64(address[0]);
     }
 };
 
@@ -453,9 +452,8 @@ struct PM4CmdEventWriteEop {
     u32 data_lo; ///< Value that will be written to memory when event occurs
     u32 data_hi; ///< Value that will be written to memory when event occurs
 
-    template <typename T>
-    T* Address() const {
-        return reinterpret_cast<T*>(address_lo | u64(address_hi) << 32);
+    u64 AddressValue() const {
+        return address_lo | (u64(address_hi) << 32);
     }
 
     u32 DataDWord() const {
@@ -466,32 +464,34 @@ struct PM4CmdEventWriteEop {
         return data_lo | u64(data_hi) << 32;
     }
 
-    void SignalFence(auto&& write_mem, auto&& signal_irq) const {
-        u32* address = Address<u32>();
+    bool SignalFence(auto&& write_mem, auto&& signal_irq) const {
+        bool write_succeeded = true;
         switch (data_sel.Value()) {
         case DataSelect::None: {
             break;
         }
         case DataSelect::Data32Low: {
-            write_mem(address, DataDWord(), sizeof(u32));
+            write_succeeded = write_mem(AddressValue(), DataDWord(), sizeof(u32));
             break;
         }
         case DataSelect::Data64: {
-            write_mem(address, DataQWord(), sizeof(u64));
+            write_succeeded = write_mem(AddressValue(), DataQWord(), sizeof(u64));
             break;
         }
         case DataSelect::GpuClock64: {
-            write_mem(address, GetGpuClock64(), sizeof(u64));
+            write_succeeded = write_mem(AddressValue(), GetGpuClock64(), sizeof(u64));
             break;
         }
         case DataSelect::PerfCounter: {
-            write_mem(address, GetGpuPerfCounter(), sizeof(u64));
+            write_succeeded = write_mem(AddressValue(), GetGpuPerfCounter(), sizeof(u64));
             break;
         }
         default: {
             UNREACHABLE();
         }
         }
+
+        if (!write_succeeded) return false;
 
         switch (int_sel.Value()) {
         case InterruptSelect::None: {
@@ -509,6 +509,7 @@ struct PM4CmdEventWriteEop {
             UNREACHABLE();
         }
         }
+        return true;
     }
 };
 
@@ -688,17 +689,16 @@ struct PM4CmdWaitRegMem {
     u32 mask;
     u32 poll_interval;
 
-    template <typename T = u32*>
-    T Address() const {
-        return std::bit_cast<T>((uintptr_t(poll_addr_hi) << 32) | (poll_addr_lo << 2));
+    VAddr AddressValue() const {
+        return (u64(poll_addr_hi) << 32) | (u64(poll_addr_lo) << 2);
     }
 
     u32 Reg() const {
         return reg.Value();
     }
 
-    bool Test(std::span<const u32> regs) const {
-        return TestValue(mem_space.Value() == MemSpace::Memory ? *Address() : regs[Reg()]);
+    bool TestRegister(std::span<const u32> regs) const {
+        return TestValue(regs[Reg()]);
     }
 
     bool TestValue(u32 value) const {
@@ -804,20 +804,24 @@ struct PM4CmdEventWriteEos {
         return this->data;
     }
 
-    void SignalFence(auto&& write_mem) const {
+    u64 AddressValue() const {
+        return address_lo | (u64(address_hi) << 32);
+    }
+
+    bool SignalFence(auto&& write_mem) const {
         const auto cmd = command.Value();
         switch (cmd) {
         case Command::SignalFence: {
-            write_mem(Address(), DataDWord(), sizeof(u32));
-            break;
+            return write_mem(AddressValue(), DataDWord(), sizeof(u32));
         }
         case Command::GdsStore: {
-            break;
+            return true;
         }
         default: {
             UNREACHABLE_MSG("Unknown command {}", u32(cmd));
         }
         }
+        return false;
     }
 };
 
@@ -854,9 +858,8 @@ struct PM4DumpConstRam {
     u32 addr_lo;
     u32 addr_hi;
 
-    template <typename T>
-    T Address() const {
-        return reinterpret_cast<T>((u64(addr_hi) << 32u) | addr_lo);
+    VAddr AddressValue() const {
+        return (u64(addr_hi) << 32u) | addr_lo;
     }
 
     [[nodiscard]] u32 Offset() const {
@@ -906,9 +909,8 @@ struct PM4CmdIndirectBuffer {
         u32 dw2;
     };
 
-    template <typename T>
-    T* Address() const {
-        return reinterpret_cast<T*>((u64(ibase_hi) << 32u) | ibase_lo);
+    VAddr AddressValue() const {
+        return (u64(ibase_hi) << 32u) | ibase_lo;
     }
 };
 
@@ -949,6 +951,10 @@ struct PM4CmdReleaseMem {
         return std::bit_cast<T>(full_address);
     }
 
+    u64 AddressValue() const {
+        return address_lo | (u64(address_hi) << 32);
+    }
+
     u32 DataDWord() const {
         return data_lo;
     }
@@ -957,32 +963,39 @@ struct PM4CmdReleaseMem {
         return data_lo | u64(data_hi) << 32;
     }
 
-    void SignalFence(auto&& signal_irq, auto&& gds_to_mem) const {
+    bool SignalFence(auto&& write_mem, auto&& signal_irq, auto&& gds_to_mem) const {
+        bool write_succeeded = true;
         switch (data_sel.Value()) {
         case DataSelect::Data32Low: {
-            *Address<u32*>() = DataDWord();
+            const u32 value = DataDWord();
+            write_succeeded = write_mem(AddressValue(), &value, sizeof(value));
             break;
         }
         case DataSelect::Data64: {
-            *Address<u64*>() = DataQWord();
+            const u64 value = DataQWord();
+            write_succeeded = write_mem(AddressValue(), &value, sizeof(value));
             break;
         }
         case DataSelect::GpuClock64: {
-            *Address<u64*>() = GetGpuClock64();
+            const u64 value = GetGpuClock64();
+            write_succeeded = write_mem(AddressValue(), &value, sizeof(value));
             break;
         }
         case DataSelect::PerfCounter: {
-            *Address<u64*>() = GetGpuPerfCounter();
+            const u64 value = GetGpuPerfCounter();
+            write_succeeded = write_mem(AddressValue(), &value, sizeof(value));
             break;
         }
         case DataSelect::GdsMemStore: {
-            gds_to_mem(Address<VAddr>(), gds_index, num_dw);
+            write_succeeded = gds_to_mem(AddressValue(), gds_index, num_dw);
             break;
         }
         default: {
             UNREACHABLE();
         }
         }
+
+        if (!write_succeeded) return false;
 
         switch (int_sel.Value()) {
         case InterruptSelect::None: {
@@ -999,6 +1012,7 @@ struct PM4CmdReleaseMem {
             UNREACHABLE();
         }
         }
+        return true;
     }
 };
 
@@ -1191,36 +1205,14 @@ struct PM4CmdMemSemaphore {
         BitField<29, 3, Select> sem_sel; ///< Indicates whether to do a signal or wait operation
     };
 
-    template <typename T>
-    [[nodiscard]] T Address() const {
-        return std::bit_cast<T>(u64(addr_lo) << 3 | (u64(addr_hi) << 32));
+    [[nodiscard]] VAddr AddressValue() const {
+        return (u64(addr_lo) << 3) | (u64(addr_hi) << 32);
     }
 
     [[nodiscard]] bool IsSignaling() const {
         return sem_sel == Select::SignalSemaphore;
     }
 
-    [[nodiscard]] bool Signaled() const {
-        return *Address<u64*>() > 0;
-    }
-
-    void Decrement() const {
-        *Address<u64*>() -= 1;
-    }
-
-    void Signal() const {
-        auto* ptr = Address<u64*>();
-        switch (signal_type) {
-        case SignalType::Increment:
-            *ptr += 1;
-            break;
-        case SignalType::Write:
-            *ptr = 1;
-            break;
-        default:
-            UNREACHABLE_MSG("Unknown signal type {}", static_cast<u32>(signal_type.Value()));
-        }
-    }
 };
 
 struct PM4CmdCondExec {
@@ -1238,9 +1230,8 @@ struct PM4CmdCondExec {
                                          ///< if bool pointed to is zero
     };
 
-    bool* Address() const {
-        return std::bit_cast<bool*>(u64(bool_addr_hi.Value()) << 32 | u64(bool_addr_lo.Value())
-                                                                          << 2);
+    VAddr AddressValue() const {
+        return (u64(bool_addr_hi.Value()) << 32) | (u64(bool_addr_lo.Value()) << 2);
     }
 };
 

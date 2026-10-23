@@ -1045,8 +1045,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             if (role == Motion::BufferRole::SmallSkeleton &&
                 memory->IsValidGpuMapping(address, 0) &&
                 memory->ClampRangeSize(address, size) == size) {
-                palette = XXH3_64bits_withSeed(reinterpret_cast<const void*>(address), size,
-                                               palette);
+                u64 next_palette{};
+                if (memory->HashSparseMemory(address, size, palette, next_palette)) {
+                    palette = next_palette;
+                }
             }
         }
         push_data.motion_param = 0;
@@ -1063,25 +1065,29 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 range = {};
                 const u64 bytes = u64(regs.num_indices) * index_size;
                 if (index_address && memory->IsValidGpuMapping(index_address, 0) &&
+                    bytes <= 64 * 1024 * 1024 &&
                     memory->ClampRangeSize(index_address, bytes) == bytes) {
                     const bool restart = regs.enable_primitive_restart != 0;
                     const u32 count = regs.num_indices;
-                    const auto scanned = object_motion->IndexRange(
-                        {index_address, count, index_size, s32(base_vertex), restart}, [&] {
-                            const auto* data = reinterpret_cast<const void*>(index_address);
-                            const auto scan_range =
-                                index_size == 2
-                                    ? Motion::IndexedRange(
-                                          std::span(static_cast<const u16*>(data), count),
-                                          s32(base_vertex), restart)
-                                    : Motion::IndexedRange(
-                                          std::span(static_cast<const u32*>(data), count),
-                                          s32(base_vertex), restart);
-                            return Motion::IndexRangeCache::Result{scan_range,
-                                                                   XXH3_64bits(data, bytes)};
-                        });
-                    range = scanned.range;
-                    topology = scanned.topology;
+                    std::vector<u8> index_data(bytes);
+                    if (memory->CopySparseMemory(index_address, index_data.data(), bytes)) {
+                        const auto scanned = object_motion->IndexRange(
+                            {index_address, count, index_size, s32(base_vertex), restart}, [&] {
+                                const auto* data = index_data.data();
+                                const auto scan_range =
+                                    index_size == 2
+                                        ? Motion::IndexedRange(
+                                              std::span(reinterpret_cast<const u16*>(data), count),
+                                              s32(base_vertex), restart)
+                                        : Motion::IndexedRange(
+                                              std::span(reinterpret_cast<const u32*>(data), count),
+                                              s32(base_vertex), restart);
+                                return Motion::IndexRangeCache::Result{scan_range,
+                                                                       XXH3_64bits(data, bytes)};
+                            });
+                        range = scanned.range;
+                        topology = scanned.topology;
+                    }
                 }
             }
             push_data.motion_param = object_motion->PrepareDraw({
@@ -2022,7 +2028,11 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     }
 
     // Perform image clear
-    const float* values = reinterpret_cast<float*>(buf0.base_address);
+    std::array<float, 4> values{};
+    if (!memory->CopySparseMemory(buf0.base_address,
+                                  reinterpret_cast<u8*>(values.data()), sizeof(values))) {
+        return false;
+    }
     const vk::ClearValue clear = {
         .color = {.float32 = std::array<float, 4>{values[0], values[1], values[2], values[3]}},
     };
@@ -2047,14 +2057,25 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, buffer_index) : nullptr;
         if (ring) {
             // Copied by the GPU command thread into the constant ring (read-only).
-            if (FrameCapture::Active() && memory->IsValidGpuMapping(ring->address, 0)) {
+            std::vector<u8> ring_data;
+            const bool need_ring_data =
+                (FrameCapture::Active() || (ring->size == 864 && gbuffer_draw)) &&
+                memory->IsValidGpuMapping(ring->address, 0) &&
+                ring->size <= 64 * 1024 * 1024;
+            if (need_ring_data) {
+                ring_data.resize(ring->size);
+                if (!memory->CopySparseMemory(ring->address, ring_data.data(), ring->size)) {
+                    ring_data.clear();
+                }
+            }
+            if (FrameCapture::Active() && !ring_data.empty()) {
                 FrameCapture::Buffer(stage.pgm_hash, buffer_index, ring->address,
-                                     reinterpret_cast<const void*>(ring->address), ring->size);
+                                     ring_data.data(), ring_data.size());
             }
             if (!desc.IsSpecial()) {
-                if (ring->size == 864 && gbuffer_draw &&
-                    memory->IsValidGpuMapping(ring->address, 0)) {
-                    camera_motion->OnConstants(reinterpret_cast<const float*>(ring->address));
+                if (ring->size == 864 && gbuffer_draw && ring_data.size() == 864) {
+                    camera_motion->OnConstants(
+                        reinterpret_cast<const float*>(ring_data.data()));
                 }
                 push_data.AddOffset(binding.buffer, 0);
             }
@@ -2113,27 +2134,51 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         } else {
             const auto vsharp =
                 prepared ? prepared->buffer_sharps[buffer_index] : desc.GetSharp(stage);
+            std::array<float, 216> motion_constants{};
+            bool have_motion_constants = false;
             if (vsharp.GetSize() == 864 && gbuffer_draw &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
-                camera_motion->OnConstants(reinterpret_cast<const float*>(vsharp.base_address));
+                have_motion_constants = memory->CopySparseMemory(
+                    vsharp.base_address, reinterpret_cast<u8*>(motion_constants.data()),
+                    sizeof(motion_constants));
+                if (have_motion_constants) {
+                    camera_motion->OnConstants(motion_constants.data());
+                }
             }
             // Object motion research: the vertex shader buffers of G-buffer draws.
             if (FrameCapture::Active() && gbuffer_draw && stage.sw_stage == Shader::SwStage::Vertex &&
                 vsharp.base_address != 0 && memory->IsValidGpuMapping(vsharp.base_address, 0)) {
-                const auto* f = reinterpret_cast<const float*>(vsharp.base_address);
-                char note[192];
-                std::snprintf(note, sizeof(note),
-                              "\n  gb vs %08x slot %u at %#llx size %u stride %u: %g %g %g %g",
-                              u32(stage.pgm_hash), binding.buffer,
-                              (unsigned long long)vsharp.base_address, u32(vsharp.GetSize()),
-                              u32(vsharp.GetStride()), f[0], f[1], f[2], f[3]);
-                FrameCapture::Note(note);
+                std::array<float, 4> first_values{};
+                if (memory->CopySparseMemory(vsharp.base_address,
+                                            reinterpret_cast<u8*>(first_values.data()),
+                                            sizeof(first_values))) {
+                    char note[192];
+                    std::snprintf(note, sizeof(note),
+                                  "\n  gb vs %08x slot %u at %#llx size %u stride %u: %g %g %g %g",
+                                  u32(stage.pgm_hash), binding.buffer,
+                                  (unsigned long long)vsharp.base_address, u32(vsharp.GetSize()),
+                                  u32(vsharp.GetStride()), first_values[0], first_values[1],
+                                  first_values[2], first_values[3]);
+                    FrameCapture::Note(note);
+                }
             }
             if (FrameCapture::Active() && vsharp.base_address != 0 && vsharp.GetSize() != 0 &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
-                FrameCapture::Buffer(stage.pgm_hash, binding.buffer, vsharp.base_address,
-                                     reinterpret_cast<const void*>(vsharp.base_address),
-                                     memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
+                const u64 capture_size = memory->ClampRangeSize(vsharp.base_address,
+                                                                vsharp.GetSize());
+                if (capture_size <= 64 * 1024 * 1024) {
+                    std::vector<u8> capture_data(capture_size);
+                    if (memory->CopySparseMemory(vsharp.base_address, capture_data.data(),
+                                                 capture_size)) {
+                        FrameCapture::Buffer(stage.pgm_hash, binding.buffer,
+                                             vsharp.base_address, capture_data.data(),
+                                             capture_size);
+                    }
+                } else {
+                    LOG_WARNING(Render_Vulkan,
+                                "Skipping oversized frame-capture buffer {:#x}+{:#x}",
+                                vsharp.base_address, capture_size);
+                }
             }
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
@@ -3053,11 +3098,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
                "FillBuffer address and size must be a multiple of 4 bytes");
     if (!is_gds) {
         texture_cache.ClearMeta(address);
-        if (!buffer_cache.IsRegionGpuModified(address, num_bytes)) {
-            u32* buffer = std::bit_cast<u32*>(address);
-            std::fill(buffer, buffer + (num_bytes / sizeof(u32)), value);
-            return;
-        }
+        texture_cache.InvalidateMemoryFromGPU(address, num_bytes);
     }
     const auto [buffer, offset] = [&] -> std::pair<const VideoCore::Buffer*, u64> {
         if (is_gds) {
@@ -3070,14 +3111,6 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
     DrainDrawPipe();
-    if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
-        if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
-            !texture_cache.FindImageFromRange(src, num_bytes)) {
-            // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
-            std::memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
-            return;
-        }
-    }
     texture_cache.InvalidateMemoryFromGPU(dst, num_bytes);
     const auto* gds_buffer = buffer_cache.GetGdsBuffer();
     const auto [src_buffer, src_offset] = [&] -> std::pair<const VideoCore::Buffer*, u64> {

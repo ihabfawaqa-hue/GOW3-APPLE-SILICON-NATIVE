@@ -9,8 +9,11 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/host_shaders/buffer_multi_copy_comp.h"
+#include "core/memory.h"
 #include "gow3_toggles.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
+
+#include <vector>
 
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
@@ -154,7 +157,16 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     };
     static_assert(sizeof(CopyShaderControl) == 12);
     ASSERT(ctl_buf_sharp.GetStride() == sizeof(CopyShaderControl));
-    const auto ctl_buf = reinterpret_cast<const CopyShaderControl*>(ctl_buf_sharp.base_address);
+    const u64 control_bytes = u64(cs_program.dim_x) * sizeof(CopyShaderControl);
+    if (control_bytes > 64 * 1024 * 1024) {
+        return false;
+    }
+    std::vector<CopyShaderControl> control(cs_program.dim_x);
+    if (!Core::Memory::Instance()->CopySparseMemory(
+            ctl_buf_sharp.base_address, reinterpret_cast<u8*>(control.data()), control_bytes)) {
+        return false;
+    }
+    const auto* ctl_buf = control.data();
 
     static std::vector<vk::BufferCopy> copies;
     copies.clear();

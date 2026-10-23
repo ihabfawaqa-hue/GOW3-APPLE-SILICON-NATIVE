@@ -1,5 +1,5 @@
 // gow3: the MemoryManager surface used by the video core and GnmDriver.
-// Guest memory lives at identical host addresses; the C runtime owns the VMAs.
+// Guest VAddrs are translated by the host memory service; they are not pointers.
 #pragma once
 #include "common/types.h"
 #include "common/singleton.h"
@@ -12,13 +12,14 @@ class MemoryManager {
 public:
     void SetRasterizer(Vulkan::Rasterizer* rasterizer_);
     AddressSpace& GetAddressSpace() { return impl; }
-    bool IsValidGpuMapping(VAddr virtual_addr, u64 size) {
-        // The PS4's GPU can only handle 40 bit addresses.
-        return virtual_addr + size < 0x100'0000'0000ULL;
-    }
+    bool IsValidGpuMapping(VAddr virtual_addr, u64 size);
+    bool GuestAddressFromHost(const void* host_pointer, VAddr& guest_address);
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
-    void CopySparseMemory(VAddr source, u8* dest, u64 size);
-    bool TryWriteBacking(void* address, const void* data, u64 size);
+    bool CopySparseMemory(VAddr source, u8* dest, u64 size);
+    bool HashSparseMemory(VAddr source, u64 size, u64 seed, u64& hash);
+    bool AtomicLoad(VAddr address, u32 size, u64& value);
+    bool AtomicSemaphore(VAddr address, u32 operation, u64 operand, u64& previous_value);
+    bool TryWriteBacking(VAddr guest_address, const void* data, u64 size);
     /// CPU wrote guest memory outside page tracking (e.g. decoded video frames).
     void InvalidateMemory(VAddr address, u64 size);
     Vulkan::Rasterizer* GetRasterizer() const { return rasterizer; }

@@ -1,5 +1,5 @@
-// gow3: address-space operations the video core needs, backed by the C
-// runtime's VMA table (runtime_memory.c).
+// gow3: address-space operations the video core needs, backed by the installed
+// host guest-memory service contract.
 #pragma once
 #include <boost/icl/interval_set.hpp>
 #include "common/enum.h"

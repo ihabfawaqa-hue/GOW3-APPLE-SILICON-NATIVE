@@ -343,11 +343,31 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
         // `IndirectBuffer` command. To access the actual command stream, we need to unwrap the IB.
         auto acb = acb_span;
         auto base_addr = reinterpret_cast<uintptr_t>(acb_ptr);
+        std::vector<u32> indirect_words;
         const auto* indirect_buffer =
             reinterpret_cast<const PM4CmdIndirectBuffer*>(acb_span.data());
         if (indirect_buffer->header.opcode == PM4ItOpcode::IndirectBuffer) {
-            base_addr = reinterpret_cast<uintptr_t>(indirect_buffer->Address<const u32>());
-            acb = {reinterpret_cast<const u32*>(base_addr), indirect_buffer->ib_size};
+            constexpr u32 max_dump_dwords = (64 * 1024 * 1024) / sizeof(u32);
+            const VAddr guest_address = indirect_buffer->AddressValue();
+            if (indirect_buffer->ib_size <= max_dump_dwords &&
+                Core::Memory::Instance()->IsValidGpuMapping(
+                    guest_address, u64(indirect_buffer->ib_size) * sizeof(u32))) {
+                indirect_words.resize(indirect_buffer->ib_size);
+                if (Core::Memory::Instance()->CopySparseMemory(
+                        guest_address, reinterpret_cast<u8*>(indirect_words.data()),
+                        indirect_words.size() * sizeof(u32))) {
+                    base_addr = guest_address;
+                    acb = indirect_words;
+                } else {
+                    LOG_ERROR(Lib_GnmDriver,
+                              "GPU debug capture could not read indirect buffer at {:#x}",
+                              guest_address);
+                }
+            } else {
+                LOG_ERROR(Lib_GnmDriver,
+                          "GPU debug capture rejected indirect buffer at {:#x}, {} dwords",
+                          guest_address, indirect_buffer->ib_size.Value());
+            }
         }
 
         using namespace DebugStateType;

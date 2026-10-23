@@ -1,5 +1,6 @@
 #include "gow3_write_log.h"
 // gow3: glue between the C loader and the vendored shadPS4 video core.
+#include <xxhash.h>
 #include "gow3_overlay.h"
 #include "gow3_png.h"
 #include "gow3_settings.h"
@@ -9,12 +10,14 @@
 #endif
 #include "gow3_toggles.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <boost/asio/io_context.hpp>
 #include "common/polyfill_thread.h"
 #include "video_core/renderdoc.h"
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <chrono>
@@ -29,23 +32,17 @@
 #include "core/libraries/libs.h"
 #include "core/memory.h"
 #include "core/signals.h"
+#include "common/scope_exit.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern "C" {
 // runtime_memory.c
-int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
-int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
-uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
-int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
-void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
-typedef void (*RuntimeGpuRange)(uintptr_t address, uint64_t size);
 // runtime_kernel.c: one clock for guest and GPU timestamps
 uint64_t runtime_process_time_us(void);
 uint64_t runtime_process_time_counter(void);
 uint64_t runtime_tsc_frequency(void);
 int32_t* runtime_errno(void);
-void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, RuntimeGpuRange invalidate);
 }
 
 Frontend::WindowSDL* g_window = nullptr;
@@ -62,7 +59,48 @@ struct Symbol {
 };
 std::vector<Symbol> g_symbols;
 u32 g_sdk_version;
+std::mutex g_guest_memory_api_mutex;
+Gow3GpuGuestMemoryApi g_guest_memory_api{};
+bool g_guest_memory_api_installed{};
+std::atomic_bool g_guest_memory_error_reported{};
+
+bool GetGuestMemoryApi(Gow3GpuGuestMemoryApi& api) {
+    std::scoped_lock lock{g_guest_memory_api_mutex};
+    if (!g_guest_memory_api_installed) return false;
+    api = g_guest_memory_api;
+    return true;
+}
+
+bool GuestMemoryApiInstalled() {
+    std::scoped_lock lock{g_guest_memory_api_mutex};
+    return g_guest_memory_api_installed;
+}
+
+void ReportGuestMemoryError(const char* operation, VAddr address, u64 size) {
+    if (!g_guest_memory_error_reported.exchange(true, std::memory_order_relaxed)) {
+        std::fprintf(stderr,
+                     "[gow3gpu-memory] %s failed for guest range %#llx+%#llx; "
+                     "subsequent errors are suppressed\n",
+                     operation, static_cast<unsigned long long>(address),
+                     static_cast<unsigned long long>(size));
+    }
+}
 } // namespace
+
+extern "C" int gow3gpu_set_guest_memory_api(const Gow3GpuGuestMemoryApi* api) {
+    if (!api || api->abi_version != GOW3GPU_GUEST_MEMORY_ABI_VERSION ||
+        api->struct_size < sizeof(Gow3GpuGuestMemoryApi) || !api->is_mapped ||
+        !api->host_to_guest || !api->query_region || !api->read || !api->atomic_load ||
+        !api->atomic_u64 || !api->writeback ||
+        !api->clamp_range_size || !api->gpu_protect || !api->install_gpu_hooks) {
+        return -1;
+    }
+    std::scoped_lock lock{g_guest_memory_api_mutex};
+    if (g_guest_memory_api_installed) return -2;
+    g_guest_memory_api = *api;
+    g_guest_memory_api_installed = true;
+    return 0;
+}
 
 namespace Core::Loader {
 void SymbolsResolver::AddSymbol(const char* nid, const char* library, const char* module, SymbolType,
@@ -87,51 +125,173 @@ public:
 
 void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
     rasterizer = rasterizer_;
-    // Existing guest mappings are replayed by the runtime when hooks are installed.
-    runtime_memory_set_gpu_hooks(
-        [](uintptr_t address, uint64_t size) {
-            auto* r = Memory::Instance()->GetRasterizer();
+    if (!rasterizer_) {
+        return;
+    }
+    Gow3GpuGuestMemoryApi api{};
+    if (!GetGuestMemoryApi(api) ||
+        !api.install_gpu_hooks(api.user_context,
+        [](void* context, uint64_t address, uint64_t size) {
+            auto* r = static_cast<Vulkan::Rasterizer*>(context);
             r->RegisterMemory(address, size);
             r->MapMemory(address, size);
         },
-        [](uintptr_t address, uint64_t size) { Memory::Instance()->GetRasterizer()->UnmapMemory(address, size); },
-        [](uintptr_t address, uint64_t size) {
-            Memory::Instance()->GetRasterizer()->InvalidateMemory(address, size);
-        });
+        [](void* context, uint64_t address, uint64_t size) {
+            static_cast<Vulkan::Rasterizer*>(context)->UnmapMemory(address, size);
+        },
+        [](void* context, uint64_t address, uint64_t size) {
+            static_cast<Vulkan::Rasterizer*>(context)->InvalidateMemory(address, size);
+        }, rasterizer_)) {
+        ReportGuestMemoryError("install GPU mapping hooks", 0, 0);
+    }
+}
+bool MemoryManager::IsValidGpuMapping(VAddr virtual_addr, u64 size) {
+    Gow3GpuGuestMemoryApi api{};
+    return GetGuestMemoryApi(api) && api.is_mapped(api.user_context, virtual_addr, size) != 0;
+}
+bool MemoryManager::GuestAddressFromHost(const void* host_pointer, VAddr& guest_address) {
+    Gow3GpuGuestMemoryApi api{};
+    guest_address = 0;
+    uint64_t address = 0;
+    if (!host_pointer || !GetGuestMemoryApi(api) ||
+        !api.host_to_guest(api.user_context, host_pointer, &address)) {
+        return false;
+    }
+    guest_address = static_cast<VAddr>(address);
+    return true;
+}
+bool MemoryManager::AtomicLoad(VAddr address, u32 size, u64& value) {
+    Gow3GpuGuestMemoryApi api{};
+    value = 0;
+    if ((size != 1 && size != 4 && size != 8) || address % size != 0 ||
+        !GetGuestMemoryApi(api) ||
+        !api.atomic_load(api.user_context, address, size, &value)) {
+        ReportGuestMemoryError("atomic guest load", address, size);
+        return false;
+    }
+    return true;
+}
+bool MemoryManager::AtomicSemaphore(VAddr address, u32 operation, u64 operand,
+                                    u64& previous_value) {
+    Gow3GpuGuestMemoryApi api{};
+    previous_value = 0;
+    if ((address & (alignof(u64) - 1)) != 0 || operation > GOW3GPU_ATOMIC_STORE_RELEASE ||
+        !GetGuestMemoryApi(api) ||
+        !api.atomic_u64(api.user_context, address, operation, operand,
+                        &previous_value)) {
+        ReportGuestMemoryError("atomic guest semaphore", address, sizeof(u64));
+        return false;
+    }
+    return true;
 }
 void MemoryManager::InvalidateMemory(VAddr address, u64 size) {
     if (rasterizer) rasterizer->InvalidateMemory(address, size);
 }
 u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
-    return runtime_memory_clamp(virtual_addr, size);
+    Gow3GpuGuestMemoryApi api{};
+    return GetGuestMemoryApi(api)
+        ? api.clamp_range_size(api.user_context, virtual_addr, size)
+        : 0;
 }
-static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
+static bool CopySparseSerial(const Gow3GpuGuestMemoryApi& api, VAddr source,
+                             u8* dest, u64 size) {
+    if (!dest || source > std::numeric_limits<VAddr>::max() - size) {
+        ReportGuestMemoryError("validate sparse read", source, size);
+        if (dest) std::memset(dest, 0, size);
+        return false;
+    }
+    bool success = true;
     while (size) {
-        uintptr_t start = 0, end = 0;
+        uint64_t start = 0, end = 0;
         int mapped = 0;
-        if (!runtime_memory_region(source, &start, &end, &mapped)) {
-            end = source + size;
+        if (!api.query_region(api.user_context, source, &start, &end, &mapped) ||
+            start > source || end <= source) {
+            ReportGuestMemoryError("query sparse read", source, size);
+            std::memset(dest, 0, size);
+            return false;
         }
         const u64 n = std::min<u64>(size, end - source);
-        if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
-        else std::memset(dest, 0, n);
+        if (mapped) {
+            if (!api.read(api.user_context, source, dest, n)) {
+                ReportGuestMemoryError("read guest bytes", source, n);
+                std::memset(dest, 0, n);
+                success = false;
+            }
+        } else {
+            std::memset(dest, 0, n);
+        }
         source += n; dest += n; size -= n;
     }
+    return success;
 }
-void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
+bool MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
+    Gow3GpuGuestMemoryApi api{};
+    if (!GetGuestMemoryApi(api)) {
+        ReportGuestMemoryError("missing guest-memory API", source, size);
+        if (dest) std::memset(dest, 0, size);
+        return false;
+    }
+    if (!dest || source > std::numeric_limits<VAddr>::max() - size) {
+        ReportGuestMemoryError("validate guest read", source, size);
+        if (dest) std::memset(dest, 0, size);
+        return false;
+    }
     // gow3: large uploads (streaming) are split across the copy threads.
     constexpr u64 Chunk = 512 * 1024;
     if (size < 4 * Chunk || !Gow3Copy::Enabled()) {
-        return CopySparseSerial(source, dest, size);
+        return CopySparseSerial(api, source, dest, size);
     }
+    std::atomic_bool success{true};
     Gow3Copy::ParallelFor((size + Chunk - 1) / Chunk, [&](std::size_t i) {
         const u64 offset = i * Chunk;
-        CopySparseSerial(source + offset, dest + offset, std::min(Chunk, size - offset));
+        if (!CopySparseSerial(api, source + offset, dest + offset,
+                              std::min(Chunk, size - offset))) {
+            success.store(false, std::memory_order_relaxed);
+        }
     });
+    return success.load(std::memory_order_relaxed);
 }
-bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    Gow3WriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, Gow3WriteLog::Backing);
-    return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
+bool MemoryManager::HashSparseMemory(VAddr source, u64 size, u64 seed, u64& hash) {
+    if (source > std::numeric_limits<VAddr>::max() - size) {
+        ReportGuestMemoryError("validate sparse hash", source, size);
+        hash = 0;
+        return false;
+    }
+    XXH3_state_t* state = XXH3_createState();
+    if (!state) {
+        ReportGuestMemoryError("allocate sparse hash state", source, size);
+        hash = 0;
+        return false;
+    }
+    SCOPE_EXIT { XXH3_freeState(state); };
+    if (XXH3_64bits_reset_withSeed(state, seed) != XXH_OK) {
+        ReportGuestMemoryError("initialize sparse hash state", source, size);
+        hash = 0;
+        return false;
+    }
+
+    std::array<u8, 64 * 1024> chunk{};
+    bool success = true;
+    for (u64 offset = 0; offset < size;) {
+        const u64 count = std::min<u64>(chunk.size(), size - offset);
+        if (!CopySparseMemory(source + offset, chunk.data(), count)) {
+            success = false;
+        }
+        if (XXH3_64bits_update(state, chunk.data(), count) != XXH_OK) {
+            ReportGuestMemoryError("update sparse hash state", source + offset, count);
+            hash = 0;
+            return false;
+        }
+        offset += count;
+    }
+    hash = XXH3_64bits_digest(state);
+    return success;
+}
+bool MemoryManager::TryWriteBacking(VAddr guest_address, const void* data, u64 size) {
+    Gow3WriteLog::Note(guest_address, data, size, Gow3WriteLog::Backing);
+    Gow3GpuGuestMemoryApi api{};
+    return GetGuestMemoryApi(api) &&
+           api.writeback(api.user_context, guest_address, data, size) != 0;
 }
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
     Gow3Stats::Timer timer{Gow3Stats::t_protect};
@@ -142,8 +302,13 @@ void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms)
         Gow3Stats::protect_revoke_calls.fetch_add(1, std::memory_order_relaxed);
         Gow3Stats::protect_revoke_pages.fetch_add(pages, std::memory_order_relaxed);
     }
-    runtime_memory_gpu_protect(virtual_addr, size, True(perms & MemoryPermission::Read),
-                               True(perms & MemoryPermission::Write));
+    Gow3GpuGuestMemoryApi api{};
+    if (!GetGuestMemoryApi(api) ||
+        !api.gpu_protect(api.user_context, virtual_addr, size,
+                         True(perms & MemoryPermission::Read),
+                         True(perms & MemoryPermission::Write))) {
+        ReportGuestMemoryError("apply GPU page protection", virtual_addr, size);
+    }
 }
 boost::icl::interval_set<VAddr> AddressSpace::GetUsableRegions() {
     boost::icl::interval_set<VAddr> set;
@@ -209,6 +374,11 @@ static void StartProfileWriter() {
 #endif
 
 extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
+    if (!config || !GuestMemoryApiInstalled()) {
+        std::fprintf(stderr,
+                     "[gow3gpu] init rejected: valid host guest-memory API must be installed first\n");
+        return -1;
+    }
     Gow3Settings::Load();
 #ifdef GOW3_PGO_GENERATE
     StartProfileWriter();

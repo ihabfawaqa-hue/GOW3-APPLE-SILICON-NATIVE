@@ -90,7 +90,7 @@ void TextureCache::RetireReadbacks() {
         [this](auto& entry) {
             if (entry.valid) {
                 entry.payload.Invalidate();
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
+                Core::Memory::Instance()->TryWriteBacking(entry.address,
                     entry.payload.mapped, entry.size);
                 if (entry.watched) WatchReadback<false>(entry.address, entry.size);
                 ++readbacks_completed;
@@ -180,7 +180,7 @@ void TextureCache::ProcessDownloadImages() {
                     scheduler.Finish();
                     copy->staging.Invalidate();
                     Core::Memory::Instance()->TryWriteBacking(
-                        std::bit_cast<u8*>(copy->guest_address), copy->staging.mapped, copy->size);
+                        copy->guest_address, copy->staging.mapped, copy->size);
                     runtime.GetStagingPool().FreeDeferred(copy->staging);
                 } else {
                     WatchReadback<true>(copy->guest_address, copy->size);
@@ -251,7 +251,7 @@ void TextureCache::ProcessDownloadImages() {
     scheduler.Finish();
     for (const PendingDownload& download : pending) {
         download.staging.Invalidate();
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(download.guest_address),
+        Core::Memory::Instance()->TryWriteBacking(download.guest_address,
                                                   download.staging.mapped, download.size);
         runtime.GetStagingPool().FreeDeferred(download.staging);
     }
@@ -317,13 +317,13 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     if (sync) {
         scheduler.Finish();
         download.Invalidate();
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
+        Core::Memory::Instance()->TryWriteBacking(image.info.guest_address,
                                                   download.mapped, download_size);
     } else {
         scheduler.DeferPriorityOperation(
             [this, device_addr = image.info.guest_address, download, download_size] {
                 download.Invalidate();
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
+                Core::Memory::Instance()->TryWriteBacking(device_addr,
                                                           download.mapped, download_size);
                 runtime.GetStagingPool().FreeDeferred(download);
             });
@@ -465,8 +465,8 @@ void TextureCache::InvalidateAlias(Image& image) {
 void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
     if (image.hash == 0) {
         // Initialize hash
-        const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
-        image.hash = XXH3_64bits(addr, image.info.guest_size);
+        Core::Memory::Instance()->HashSparseMemory(image.info.guest_address,
+                                                   image.info.guest_size, 0, image.hash);
     }
     image.flags |= ImageFlagBits::MaybeCpuDirty;
     UntrackImage(image_id);
@@ -1134,15 +1134,16 @@ void TextureCache::RefreshImage(Image& image) {
         // The image size should be less than page size to be considered MaybeCpuDirty
         // So this calculation should be very uncommon and reasonably fast
         // For now we'll just check up to 64 first pixels
-        const auto addr = std::bit_cast<u8*>(image.info.guest_address);
         const u32 w = std::min(image.info.size.width, u32(8));
         const u32 h = std::min(image.info.size.height, u32(8));
 
         const u32 s_w = image.info.props.is_block ? Common::DivCeil(w, 4u) : w;
         const u32 s_h = image.info.props.is_block ? Common::DivCeil(h, 4u) : h;
         const u32 size = s_w * s_h * (image.info.num_bits / 8);
-        const u64 hash = XXH3_64bits(addr, size);
-        if (image.hash == hash) {
+        u64 hash{};
+        if (Core::Memory::Instance()->HashSparseMemory(image.info.guest_address, size, 0,
+                                                       hash) &&
+            image.hash == hash) {
             image.flags &= ~ImageFlagBits::MaybeCpuDirty;
             return;
         }
@@ -1165,12 +1166,14 @@ void TextureCache::RefreshImage(Image& image) {
 
         // Protect GPU modified resources from accidental CPU reuploads.
         if (is_gpu_modified && !is_gpu_dirty) {
-            const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
-            const u64 hash = XXH3_64bits(addr + mip_offset, mip_size);
-            if (image.mip_hashes[m] == hash) {
-                continue;
+            u64 hash{};
+            if (Core::Memory::Instance()->HashSparseMemory(
+                    image.info.guest_address + mip_offset, mip_size, 0, hash)) {
+                if (image.mip_hashes[m] == hash) {
+                    continue;
+                }
+                image.mip_hashes[m] = hash;
             }
-            image.mip_hashes[m] = hash;
         }
 
         const u32 extent_width = mip_pitch ? std::min(mip_pitch, width) : width;

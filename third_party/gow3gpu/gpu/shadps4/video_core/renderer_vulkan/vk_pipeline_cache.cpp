@@ -200,6 +200,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
         info.hw.gs.out_vertex_data_size = regs.vgt_gs_vert_itemsize[0];
         info.hw.gs.mode = regs.vgt_gs_mode.mode;
         const auto params_vc = AmdGpu::GetParams(regs.vs_program);
+        sel.geometry_copy_storage = params_vc.code_storage;
         info.hw.gs.vs_copy = params_vc.code;
         info.hw.gs.vs_copy_hash = params_vc.hash;
         DumpShader(info.hw.gs.vs_copy, info.hw.gs.vs_copy_hash, Shader::HwStage::Vertex, 0,
@@ -678,11 +679,11 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     for (u32 i = 0; i < prepared.num_stages; ++i) {
         const auto& stage = prepared.stages[i];
         const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
-        if (!pgm || !pgm->Address<u32*>()) {
+        if (!pgm || pgm->address == 0) {
             return nullptr;
         }
         const auto params = AmdGpu::GetParams(*pgm);
-        if (params.hash != stage.hash) {
+        if (params.code.empty() || params.hash != stage.hash) {
             return nullptr;
         }
         auto& info = const_cast<Program*>(stage.program)->info;
@@ -1006,13 +1007,18 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         }
 
         const auto* pgm = regs.ProgramForStage(stage_in_idx);
-        if (!pgm || !pgm->Address<u32*>()) {
+        if (!pgm || pgm->address == 0) {
             key.stage_hashes[stage_out_idx] = 0;
             sel.infos[stage_out_idx] = nullptr;
             return false;
         }
 
         const auto params = AmdGpu::GetParams(*pgm);
+        if (params.code.empty()) {
+            key.stage_hashes[stage_out_idx] = 0;
+            sel.infos[stage_out_idx] = nullptr;
+            return false;
+        }
         std::optional<Shader::Gcn::FetchShaderData> fetch_shader_;
         std::tie(sel.infos[stage_out_idx], sel.modules[stage_out_idx], fetch_shader_,
                  key.stage_hashes[stage_out_idx]) =
@@ -1128,6 +1134,9 @@ bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
+    if (cs_params.code.empty()) {
+        return false;
+    }
     std::tie(sel.infos[0], sel.modules[0], sel.fetch_shader, compute_key.value) =
         GetProgram(sel, HwStage::Compute, SwStage::Compute, cs_params, binding);
     return sel.infos[0] != nullptr;
@@ -1172,6 +1181,11 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
+    if (hw_stage == HwStage::Geometry &&
+        sel.regs->stage_enable.raw == AmdGpu::ShaderStageEnable::LsHsEsGs &&
+        runtime_info.hw.gs.vs_copy.empty()) {
+        return {};
+    }
     if (sel.worker) {
         // gow3: draw-preparation worker: look up only, with the worker's own Info copy.
         auto& worker = *sel.worker;

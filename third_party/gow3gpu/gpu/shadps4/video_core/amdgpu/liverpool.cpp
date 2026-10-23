@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <optional>
 #include <pthread.h>
 #if defined(__linux__)
 #include <sys/resource.h>
 #endif
 #include <time.h>
+#include <vector>
 #include "gow3_copy.h"
 #include "gow3_toggles.h"
 #include <cstdio>
@@ -22,6 +24,7 @@
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/memory.h"
+#include "../../../gow3gpu.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "gow3_write_log.h"
@@ -74,6 +77,21 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
     }
 
     return span.subspan(offset);
+}
+
+static std::optional<std::vector<u32>> SnapshotGuestCommandBuffer(VAddr address,
+                                                                   u32 num_dwords) {
+    std::vector<u32> snapshot(num_dwords);
+    if (num_dwords == 0) {
+        return snapshot;
+    }
+    const u64 size = u64(num_dwords) * sizeof(u32);
+    auto* memory = Core::Memory::Instance();
+    if (!memory->IsValidGpuMapping(address, size) ||
+        !memory->CopySparseMemory(address, reinterpret_cast<u8*>(snapshot.data()), size)) {
+        return std::nullopt;
+    }
+    return snapshot;
 }
 
 Liverpool::Liverpool() : guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
@@ -247,12 +265,10 @@ bool PipelinedOpcode(PM4ItOpcode opcode) {
 namespace {
 void SignalEop(const PM4CmdEventWriteEop& eop) {
     eop.SignalFence(
-        [](void* address, u64 data, u32 num_bytes) {
+        [](VAddr guest_address, u64 data, u32 num_bytes) {
             auto* memory = Core::Memory::Instance();
-            Gow3WriteLog::Note(reinterpret_cast<u64>(address), &data, num_bytes, Gow3WriteLog::Fence);
-            if (!memory->TryWriteBacking(address, &data, num_bytes)) {
-                memcpy(address, &data, num_bytes);
-            }
+            Gow3WriteLog::Note(guest_address, &data, num_bytes, Gow3WriteLog::Fence);
+            return memory->TryWriteBacking(guest_address, &data, num_bytes);
         },
         [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
 }
@@ -330,10 +346,13 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     // precede writes the guest sees.
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
-    Gow3WriteLog::Note(write_data->Address<u64>(), write_data->data,
-                     (header->type3.count.Value() - 2) * sizeof(u32), Gow3WriteLog::WriteData);
-    std::memcpy(write_data->Address<u64*>(), write_data->data,
-                (header->type3.count.Value() - 2) * sizeof(u32));
+    const VAddr guest_address = write_data->Address<VAddr>();
+    const u32 size = (header->type3.count.Value() - 2) * sizeof(u32);
+    Gow3WriteLog::Note(guest_address, write_data->data, size, Gow3WriteLog::WriteData);
+    if (!Core::Memory::Instance()->TryWriteBacking(guest_address, write_data->data, size)) {
+        LOG_ERROR(Render, "PM4 WRITE_DATA guest writeback failed at {:#x} for {} bytes",
+                  guest_address, size);
+    }
 }
 
 void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
@@ -342,18 +361,25 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
     rasterizer.ProcessDownloadImages();
-    event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {
+    const bool signal_write_succeeded = event_eos.SignalFence(
+        [](VAddr guest_address, u64 value, u32 num_bytes) {
         auto* memory = Core::Memory::Instance();
-        Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, Gow3WriteLog::Fence);
-        if (!memory->TryWriteBacking(address, &value, num_bytes)) {
-            memcpy(address, &value, num_bytes);
-        }
+        Gow3WriteLog::Note(guest_address, &value, num_bytes, Gow3WriteLog::Fence);
+        return memory->TryWriteBacking(guest_address, &value, num_bytes);
     });
+    if (!signal_write_succeeded) {
+        LOG_ERROR(Render, "PM4 EVENT_WRITE_EOS guest writeback failed at {:#x}",
+                  event_eos.AddressValue());
+    }
     if (event_eos.command == PM4CmdEventWriteEos::Command::GdsStore) {
         ASSERT(event_eos.size == 1);
         rasterizer.Finish();
         const u32 value = rasterizer.ReadDataFromGds(event_eos.gds_index);
-        *event_eos.Address() = value;
+        if (!Core::Memory::Instance()->TryWriteBacking(event_eos.AddressValue(), &value,
+                                                       sizeof(value))) {
+            LOG_ERROR(Render, "PM4 EVENT_WRITE_EOS GDS store failed at {:#x}",
+                      event_eos.AddressValue());
+        }
     }
 }
 } // namespace
@@ -363,12 +389,13 @@ void Liverpool::NotePendingFences(const auto& event) {
     while (!pending_fences.empty() && rasterizer->DrawPipeReached(pending_fences.front().position)) {
         pending_fences.pop_front();
     }
-    constexpr bool is_eop = requires { event.SignalFence([](void*, u64, u32) {}, [] {}); };
-    const auto note = [&](void* address, u64 data, u32 num_bytes) {
-        Gow3WriteLog::NoteIntent(reinterpret_cast<u64>(address), &data, num_bytes,
+    constexpr bool is_eop = requires { event.SignalFence([](u64, u64, u32) { return true; }, [] {}); };
+    const auto note = [&](VAddr guest_address, u64 data, u32 num_bytes) {
+        Gow3WriteLog::NoteIntent(guest_address, &data, num_bytes,
                                is_eop ? Gow3WriteLog::FenceIntent : Gow3WriteLog::EosIntent);
-        pending_fences.push_back({reinterpret_cast<VAddr>(address), data, num_bytes, position});
-        rasterizer->NotePendingGpuWrite(reinterpret_cast<VAddr>(address), num_bytes);
+        pending_fences.push_back({guest_address, data, num_bytes, position});
+        rasterizer->NotePendingGpuWrite(guest_address, num_bytes);
+        return true;
     };
     if constexpr (requires { event.SignalFence(note, [] {}); }) {
         event.SignalFence(note, [] {});
@@ -433,8 +460,12 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
                 rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonConstRam);
             }
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
-            memcpy(dump_const->Address<void*>(),
-                   cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
+            if (!Core::Memory::Instance()->TryWriteBacking(
+                    dump_const->AddressValue(),
+                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size())) {
+                LOG_ERROR(Render, "PM4 DUMP_CONST_RAM guest writeback failed at {:#x}",
+                          dump_const->AddressValue());
+            }
             break;
         }
         case PM4ItOpcode::IncrementCeCounter: {
@@ -450,8 +481,14 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::IndirectBufferConst: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-            auto task =
-                ProcessCeUpdate({indirect_buffer->Address<const u32>(), indirect_buffer->ib_size});
+            auto indirect = SnapshotGuestCommandBuffer(indirect_buffer->AddressValue(),
+                                                       indirect_buffer->ib_size);
+            if (!indirect) {
+                LOG_ERROR(Render, "PM4 indirect constant buffer read failed at {:#x}",
+                          indirect_buffer->AddressValue());
+                break;
+            }
+            auto task = ProcessCeUpdate(*indirect);
             RESUME_CE(task);
 
             while (!task.handle.done()) {
@@ -1126,9 +1163,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
-                        u64* results = event->Address<u64*>();
-                        for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
-                            *results = pixel_counter | OcclusionCounterValidMask;
+                        const VAddr address = event->AddressValue();
+                        const u64 value = pixel_counter | OcclusionCounterValidMask;
+                        for (s32 i = 0; i < num_counter_pairs; ++i) {
+                            if (!Core::Memory::Instance()->TryWriteBacking(
+                                    address + u64(i) * 2 * sizeof(u64), &value, sizeof(value))) {
+                                LOG_ERROR(Render, "PM4 occlusion counter write failed at {:#x}",
+                                          address + u64(i) * 2 * sizeof(u64));
+                                break;
+                            }
                         }
                         pixel_counter += OcclusionCounterStep;
                     }
@@ -1184,7 +1227,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                         (count - 2) * sizeof(u32));
                     }
                 } else {
-                    std::memcpy(write_data->Address<u64*>(), write_data->data, (count - 2) * 4);
+                    const VAddr guest_address = write_data->Address<VAddr>();
+                    const u32 size = (count - 2) * 4;
+                    if (!Core::Memory::Instance()->TryWriteBacking(guest_address,
+                                                                    write_data->data, size)) {
+                        LOG_ERROR(Render, "PM4 WRITE_DATA guest writeback failed at {:#x}",
+                                  guest_address);
+                    }
                 }
                 break;
             }
@@ -1200,13 +1249,28 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::MemSemaphore: {
                 const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
+                const VAddr address = mem_semaphore->AddressValue();
+                auto* memory = Core::Memory::Instance();
                 if (mem_semaphore->IsSignaling()) {
-                    mem_semaphore->Signal();
+                    u64 ignored{};
+                    const u32 operation = mem_semaphore->signal_type ==
+                                                  PM4CmdMemSemaphore::SignalType::Increment
+                                              ? GOW3GPU_ATOMIC_FETCH_ADD
+                                              : GOW3GPU_ATOMIC_STORE_RELEASE;
+                    memory->AtomicSemaphore(address, operation, 1, ignored);
                 } else {
-                    while (!mem_semaphore->Signaled()) {
+                    for (;;) {
+                        u64 value{};
+                        if (memory->AtomicLoad(address, sizeof(u64), value) && value != 0) {
+                            u64 previous{};
+                            if (memory->AtomicSemaphore(address,
+                                                        GOW3GPU_ATOMIC_FETCH_SUB_IF_NONZERO,
+                                                        1, previous) && previous != 0) {
+                                break;
+                            }
+                        }
                         YIELD_GFX();
                     }
-                    mem_semaphore->Decrement();
                 }
                 break;
             }
@@ -1227,31 +1291,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-                // Optimization: VO label waits are special because the emulator
-                // will write to the label when presentation is finished. So if
-                // there are no other submits to yield to we can sleep the thread
-                // instead and allow other tasks to run.
-                const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                if (vo_port->IsVoLabel(wait_addr) &&
-                    num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    if (rasterizer) {
-                        rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
+                const auto wait_condition = [&] {
+                    if (wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Register) {
+                        return wait_reg_mem->TestRegister(regs.reg_array);
                     }
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    break;
-                }
+                    u64 value{};
+                    return Core::Memory::Instance()->AtomicLoad(
+                               wait_reg_mem->AddressValue(), sizeof(u32), value) &&
+                           wait_reg_mem->TestValue(static_cast<u32>(value));
+                };
                 // gow3: a fence handed to the draw recording thread counts as written: that
                 // thread runs everything in stream order.
                 if (u32 value; wait_reg_mem->mem_space.Value() ==
                                    PM4CmdWaitRegMem::MemSpace::Memory &&
                                !Gow3Toggle::Disabled(Gow3Toggle::PendingFenceWaits) &&
-                               PendingFenceValue(wait_reg_mem->Address<VAddr>(), value) &&
+                               PendingFenceValue(wait_reg_mem->AddressValue(), value) &&
                                wait_reg_mem->TestValue(value)) {
                     break;
                 }
                 // Else the value may come from a fence that thread has yet to write: let it
                 // catch up before yielding to other queues.
-                while (!wait_reg_mem->Test(regs.reg_array)) {
+                while (!wait_condition()) {
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                         continue;
@@ -1262,8 +1322,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-                auto task = ProcessGraphics(
-                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
+                auto indirect = SnapshotGuestCommandBuffer(indirect_buffer->AddressValue(),
+                                                           indirect_buffer->ib_size);
+                if (!indirect) {
+                    LOG_ERROR(Render, "PM4 indirect command buffer read failed at {:#x}",
+                              indirect_buffer->AddressValue());
+                    break;
+                }
+                auto task = ProcessGraphics(*indirect, {});
                 // Tasks start suspended: the nested body (and its scan) runs on this resume.
                 g_dcb_depth = dcb_depth + 1;
                 RESUME_GFX(task);
@@ -1307,7 +1373,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (cond_exec->command.Value() != 0) {
                     LOG_WARNING(Render, "IT_COND_EXEC used a reserved command");
                 }
-                const auto skip = *cond_exec->Address() == false;
+                u64 condition{};
+                while (!Core::Memory::Instance()->AtomicLoad(cond_exec->AddressValue(),
+                                                              sizeof(u32),
+                                                              condition)) {
+                    YIELD_GFX();
+                }
+                const auto skip = condition == 0;
                 if (skip) {
                     dcb = NextPacket(dcb,
                                      header->type3.NumWords() + 1 + cond_exec->exec_count.Value());
@@ -1367,6 +1439,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     boost::container::small_vector<IndirectPatch, 4> indirect_patches;
 
     auto base_addr = reinterpret_cast<VAddr>(acb.data());
+    VAddr acb_guest_addr{};
+    const bool acb_has_guest_address =
+        Core::Memory::Instance()->GuestAddressFromHost(acb.data(), acb_guest_addr);
     size_t acb_size = acb.size_bytes();
     while (!acb.empty()) {
         ProcessCommands();
@@ -1423,8 +1498,14 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::IndirectBuffer: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-            auto task = ProcessCompute<true>(
-                {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, vqid);
+            auto indirect = SnapshotGuestCommandBuffer(indirect_buffer->AddressValue(),
+                                                       indirect_buffer->ib_size);
+            if (!indirect) {
+                LOG_ERROR(Render, "PM4 indirect compute buffer read failed at {:#x}",
+                          indirect_buffer->AddressValue());
+                break;
+            }
+            auto task = ProcessCompute<true>(*indirect, vqid);
             RESUME_ASC(task, vqid);
 
             while (!task.handle.done()) {
@@ -1464,12 +1545,21 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 const u32 num_bytes = dma_data->NumBytes();
                 const VAddr src_addr = dma_data->SrcAddress<VAddr>();
                 const VAddr dst_addr = dma_data->DstAddress<VAddr>();
-                const PM4Header* header =
-                    reinterpret_cast<const PM4Header*>(dst_addr - sizeof(PM4Header));
-                if (dst_addr >= base_addr && dst_addr < base_addr + acb_size &&
-                    num_bytes == sizeof(PM4CmdDispatchIndirect::GroupDimensions) &&
-                    header->type == 3 && header->type3.opcode == PM4ItOpcode::DispatchDirect) {
-                    indirect_patches.emplace_back(header, src_addr);
+                const u64 dst_offset = acb_has_guest_address && dst_addr >= acb_guest_addr
+                                           ? dst_addr - acb_guest_addr
+                                           : std::numeric_limits<u64>::max();
+                const PM4Header* patched_header = nullptr;
+                if (acb_size >= sizeof(PM4Header) &&
+                    dst_offset >= sizeof(PM4Header) &&
+                    dst_offset - sizeof(PM4Header) <= acb_size - sizeof(PM4Header)) {
+                    patched_header = reinterpret_cast<const PM4Header*>(
+                        reinterpret_cast<const u8*>(acb.data()) +
+                        dst_offset - sizeof(PM4Header));
+                }
+                if (patched_header && num_bytes == sizeof(PM4CmdDispatchIndirect::GroupDimensions) &&
+                    patched_header->type == 3 &&
+                    patched_header->type3.opcode == PM4ItOpcode::DispatchDirect) {
+                    indirect_patches.emplace_back(patched_header, src_addr);
                 } else {
                     rasterizer->CopyBuffer(dst_addr, src_addr, num_bytes, false, false);
                 }
@@ -1575,7 +1665,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
             const u32 data_size = (header->type3.count.Value() - 2) * 4;
             if (!write_data->wr_one_addr.Value()) {
-                std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
+                const VAddr guest_address = write_data->Address<VAddr>();
+                if (!Core::Memory::Instance()->TryWriteBacking(guest_address,
+                                                                write_data->data, data_size)) {
+                    LOG_ERROR(Render, "PM4 WRITE_DATA guest writeback failed at {:#x}",
+                              guest_address);
+                }
             } else {
                 UNREACHABLE();
             }
@@ -1583,20 +1678,44 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::MemSemaphore: {
             const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
+            const VAddr address = mem_semaphore->AddressValue();
+            auto* memory = Core::Memory::Instance();
             if (mem_semaphore->IsSignaling()) {
-                mem_semaphore->Signal();
+                u64 ignored{};
+                const u32 operation = mem_semaphore->signal_type ==
+                                              PM4CmdMemSemaphore::SignalType::Increment
+                                          ? GOW3GPU_ATOMIC_FETCH_ADD
+                                          : GOW3GPU_ATOMIC_STORE_RELEASE;
+                memory->AtomicSemaphore(address, operation, 1, ignored);
             } else {
-                while (!mem_semaphore->Signaled()) {
+                for (;;) {
+                    u64 value{};
+                    if (memory->AtomicLoad(address, sizeof(u64), value) && value != 0) {
+                        u64 previous{};
+                        if (memory->AtomicSemaphore(address,
+                                                    GOW3GPU_ATOMIC_FETCH_SUB_IF_NONZERO,
+                                                    1, previous) && previous != 0) {
+                            break;
+                        }
+                    }
                     YIELD_ASC(vqid);
                 }
-                mem_semaphore->Decrement();
             }
             break;
         }
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-            while (!wait_reg_mem->Test(regs.reg_array)) {
+            const auto wait_condition = [&] {
+                if (wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Register) {
+                    return wait_reg_mem->TestRegister(regs.reg_array);
+                }
+                u64 value{};
+                return Core::Memory::Instance()->AtomicLoad(
+                           wait_reg_mem->AddressValue(), sizeof(u32), value) &&
+                       wait_reg_mem->TestValue(static_cast<u32>(value));
+            };
+            while (!wait_condition()) {
                 YIELD_ASC(vqid);
             }
             break;
@@ -1613,11 +1732,17 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 rasterizer->ProcessDownloadImages();
             }
             release_mem->SignalFence(
+                [](VAddr guest_address, const void* value, u32 num_bytes) {
+                    Gow3WriteLog::Note(guest_address, value, num_bytes, Gow3WriteLog::Fence);
+                    return Core::Memory::Instance()->TryWriteBacking(guest_address, value,
+                                                                      num_bytes);
+                },
                 [pipe_id = queue.pipe_id] {
                     Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
                 },
                 [this](VAddr dst, u16 gds_index, u16 num_dwords) {
                     rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
+                    return true;
                 });
             break;
         }

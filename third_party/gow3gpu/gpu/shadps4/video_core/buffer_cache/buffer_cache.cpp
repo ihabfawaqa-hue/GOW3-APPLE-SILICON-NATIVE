@@ -205,7 +205,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : copies) {
-        auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
+        const VAddr dst_addr = arena_base + copy.srcOffset;
         memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
                                 copy.size);
     }

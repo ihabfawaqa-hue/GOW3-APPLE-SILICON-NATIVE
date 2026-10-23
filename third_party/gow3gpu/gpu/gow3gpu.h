@@ -14,6 +14,65 @@ typedef struct {
     uint32_t psf_attributes;    /* param.sfo ATTRIBUTE */
     int32_t width, height;      /* initial window size */
 } Gow3GpuConfig;
+
+/* Versioned guest-memory contract. Addresses passed here are PS4 guest virtual
+ * addresses, never host pointers. The host owns the mapping and must validate
+ * full ranges while holding its VM/direct-memory synchronization. The callbacks
+ * must be safe from GPU worker threads. */
+#define GOW3GPU_GUEST_MEMORY_ABI_VERSION 1u
+typedef void (*Gow3GpuGuestRangeHook)(void *hook_context, uint64_t address,
+                                      uint64_t size);
+typedef enum {
+    GOW3GPU_ATOMIC_FETCH_ADD = 0,
+    GOW3GPU_ATOMIC_FETCH_SUB = 1,
+    GOW3GPU_ATOMIC_FETCH_SUB_IF_NONZERO = 2,
+    GOW3GPU_ATOMIC_STORE_RELEASE = 3,
+} Gow3GpuAtomicU64Operation;
+typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    void *user_context;
+    /* True only when the complete requested range is GPU-mappable. */
+    int (*is_mapped)(void *user_context, uint64_t address, uint64_t size);
+    /* Convert a host pointer from the runtime's active guest mapping to its
+     * guest VA. Used to map host access faults back into GPU page tracking. */
+    int (*host_to_guest)(void *user_context, const void *host_pointer,
+                         uint64_t *guest_address);
+    /* Return a contiguous readable extent or hole containing address. The
+     * half-open [region_start, region_end) must contain address. mapped=0
+     * denotes a sparse hole, which the renderer reads as zeroes. */
+    int (*query_region)(void *user_context, uint64_t address,
+                        uint64_t *region_start, uint64_t *region_end,
+                        int *mapped);
+    /* Copy exactly size bytes; false means the entire copy was rejected. */
+    int (*read)(void *user_context, uint64_t address, void *destination,
+                uint64_t size);
+    /* Acquire-ordered aligned atomic load of 1, 4, or 8 bytes for PM4 waits. */
+    int (*atomic_load)(void *user_context, uint64_t address, uint32_t size,
+                       uint64_t *value);
+    /* Atomic semaphore update; fetch operations use acquire-release ordering. */
+    int (*atomic_u64)(void *user_context, uint64_t address, uint32_t operation,
+                      uint64_t operand, uint64_t *previous_value);
+    /* Publish GPU-produced bytes to guest backing memory after the renderer's
+     * required GPU completion point; preserve host page-tracking ownership. */
+    int (*writeback)(void *user_context, uint64_t address, const void *source,
+                     uint64_t size);
+    uint64_t (*clamp_range_size)(void *user_context, uint64_t address,
+                                 uint64_t requested_size);
+    /* Apply GPU page-tracking protections without changing guest VM rights. */
+    int (*gpu_protect)(void *user_context, uint64_t address, uint64_t size,
+                       int read, int write);
+    /* Install callbacks used by the GPU when guest mappings change. */
+    int (*install_gpu_hooks)(void *user_context,
+                             Gow3GpuGuestRangeHook map,
+                             Gow3GpuGuestRangeHook unmap,
+                             Gow3GpuGuestRangeHook invalidate,
+                             void *hook_context);
+} Gow3GpuGuestMemoryApi;
+
+/* Install exactly once before gow3gpu_init. Invalid or incomplete contracts
+ * are rejected before any renderer/window construction begins. */
+int gow3gpu_set_guest_memory_api(const Gow3GpuGuestMemoryApi *api);
 /* Registers kernel event queues (needed with or without graphics). */
 void gow3gpu_register_kernel(void);
 /* Creates window, Vulkan device, presenter and GPU command processor. */

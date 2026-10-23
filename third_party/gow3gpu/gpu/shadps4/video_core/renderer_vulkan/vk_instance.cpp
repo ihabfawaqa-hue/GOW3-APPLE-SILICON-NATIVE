@@ -315,6 +315,10 @@ bool Instance::CreateDevice() {
                VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+#ifdef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+    // Vulkan portability devices require the subset extension at device creation.
+    add_extension(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+#endif
 
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
     ASSERT_MSG(robustness2_features.robustBufferAccess2,

@@ -40,6 +40,15 @@ asm(".section .rdata,\"dr\"\n"
     ".global gow3_font_ttf_end\n"
     "gow3_font_ttf_end:\n"
     ".text\n");
+#elif defined(__APPLE__)
+asm(".section __TEXT,__const\n"
+    ".p2align 4\n"
+    ".globl _gow3_font_ttf\n"
+    "_gow3_font_ttf:\n"
+    ".incbin \"" GOW3_FONT_PATH "\"\n"
+    ".globl _gow3_font_ttf_end\n"
+    "_gow3_font_ttf_end:\n"
+    ".previous\n");
 #else
 asm(".section .rodata\n"
     ".balign 16\n"

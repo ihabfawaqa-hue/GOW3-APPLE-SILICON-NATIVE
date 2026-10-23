@@ -55,7 +55,9 @@ find_package(tsl-robin-map REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG QUIET)
 if (NOT VulkanMemoryAllocator_FOUND)
     # MSYS2 ships the header (include/vma/vk_mem_alloc.h) without a CMake package.
-    find_path(VMA_INCLUDE_DIR vk_mem_alloc.h PATH_SUFFIXES vma REQUIRED)
+    find_path(VMA_INCLUDE_DIR vk_mem_alloc.h
+        HINTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vma
+        PATH_SUFFIXES include vma REQUIRED)
     add_library(VulkanMemoryAllocator INTERFACE)
     add_library(GPUOpen::VulkanMemoryAllocator ALIAS VulkanMemoryAllocator)
     target_include_directories(VulkanMemoryAllocator INTERFACE ${VMA_INCLUDE_DIR})
@@ -63,7 +65,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-if (NOT WIN32)
+if (UNIX AND NOT APPLE)
     pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 endif()
 find_package(miniz QUIET)
@@ -79,6 +81,14 @@ if (NOT miniz_FOUND)
 endif()
 find_package(Zydis REQUIRED)
 find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
+
+# Homebrew's Zydis target currently names its transitive dependency as the bare
+# library string "Zycore" even though it exports the imported target Zycore::Zycore.
+# Bridge that target-name mismatch without adding a global linker search path.
+if (TARGET Zycore::Zycore AND NOT TARGET Zycore)
+    add_library(Zycore INTERFACE)
+    target_link_libraries(Zycore INTERFACE Zycore::Zycore)
+endif()
 
 set(SIRIT_USE_SYSTEM_SPIRV_HEADERS OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/sirit EXCLUDE_FROM_ALL)
@@ -168,8 +178,11 @@ set_source_files_properties(shim/gow3_overlay.cpp PROPERTIES
 target_include_directories(gow3gpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(gow3gpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(gow3gpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
-# Runtime symbols (runtime_memory_*, runtime_process_*) resolve against gow3-probe.
-if (NOT WIN32)
+# Runtime symbols (runtime_memory_*, runtime_process_*) resolve against the host runtime.
+if (APPLE)
+    # Mach-O equivalent of ELF's --allow-shlib-undefined for the runtime callbacks.
+    target_link_options(gow3gpu PRIVATE "-undefined" "dynamic_lookup")
+elseif (UNIX AND NOT WIN32)
     target_link_options(gow3gpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
 target_link_libraries(gow3gpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
@@ -183,7 +196,11 @@ if (WIN32)
     target_compile_options(gow3gpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/gow3_win_compat.h)
     target_link_libraries(gow3gpu PUBLIC Vulkan::Vulkan ws2_32 bcrypt ntdll synchronization winmm pdh)
 else()
-    target_link_libraries(gow3gpu PUBLIC PkgConfig::X11)
+    if (APPLE)
+        # SDL3 owns the Cocoa window and CAMetalLayer for VK_EXT_metal_surface.
+    else()
+        target_link_libraries(gow3gpu PUBLIC PkgConfig::X11)
+    endif()
 endif()
 
 # gow3 (Windows): gow3gpu is a static library there, so the loader and the HLE runtime are

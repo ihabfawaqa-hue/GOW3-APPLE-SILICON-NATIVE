@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -10,15 +11,23 @@
 #include <windows.h>
 #undef near
 #else
+#if defined(__APPLE__)
+#include <sys/ucontext.h>
+#else
 #include <ucontext.h>
-#include <unistd.h>
 #endif
-#include <x86intrin.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
+#endif
+
+#include "common/host_timing.h"
 
 namespace Gow3WriteLog {
 namespace {
 struct Entry {
-    std::uint64_t address, size, first, tsc;
+    std::uint64_t address, size, first, timestamp_ns;
     std::uint32_t source, tid;
 };
 constexpr std::size_t Size = 1 << 20;
@@ -28,6 +37,18 @@ std::atomic<std::uint64_t> head{0};
 std::array<Entry, 256> hits;
 std::atomic<std::uint64_t> hits_head{0};
 constexpr std::uint64_t Pattern = 0x0000005300000000ull;
+
+std::uint32_t ThreadId() {
+#ifdef _WIN32
+    return static_cast<std::uint32_t>(GetCurrentThreadId());
+#elif defined(__APPLE__)
+    std::uint64_t thread_id = 0;
+    pthread_threadid_np(nullptr, &thread_id);
+    return static_cast<std::uint32_t>(thread_id);
+#else
+    return static_cast<std::uint32_t>(gettid());
+#endif
+}
 
 void Push(std::array<Entry, Size>& r, std::atomic<std::uint64_t>& h, const Entry& e) {
     r[h.fetch_add(1, std::memory_order_relaxed) % r.size()] = e;
@@ -61,8 +82,8 @@ void Note(std::uint64_t address, const void* data, std::uint64_t size, Source so
 }
 
 void Record(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
-    static thread_local const std::uint32_t tid = static_cast<std::uint32_t>(gettid());
-    Entry e{address, size, 0, __rdtsc(), source, tid};
+    static thread_local const std::uint32_t tid = ThreadId();
+    Entry e{address, size, 0, Common::MonotonicNanoseconds(), source, tid};
     std::memcpy(&e.first, data, size < 8 ? size : 8);
     Push(ring, head, e);
     // Only small writes are scanned: scanning downloads of megabytes delays them enough to hide
@@ -93,6 +114,12 @@ extern "C" void gow3gpu_dump_guest_writes(void* ucontext) {
     // The loader passes EXCEPTION_POINTERS (see signal_context.cpp).
     const CONTEXT* c = static_cast<const EXCEPTION_POINTERS*>(ucontext)->ContextRecord;
     const std::uint64_t regs[] = {c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->R14, c->R15};
+#elif defined(__APPLE__) && defined(__aarch64__)
+    const auto* uc = static_cast<const ucontext_t*>(ucontext);
+    const auto* g = uc->uc_mcontext;
+    const std::uint64_t regs[] = {g->__ss.__x[0], g->__ss.__x[1], g->__ss.__x[2],
+                                  g->__ss.__x[3], g->__ss.__x[28], g->__ss.__x[29],
+                                  g->__ss.__x[30], g->__ss.__sp};
 #else
     const auto* uc = static_cast<const ucontext_t*>(ucontext);
     const auto* g = uc->uc_mcontext.gregs;
@@ -101,19 +128,25 @@ extern "C" void gow3gpu_dump_guest_writes(void* ucontext) {
                                   std::uint64_t(g[REG_RSI]), std::uint64_t(g[REG_RDI]),
                                   std::uint64_t(g[REG_R14]), std::uint64_t(g[REG_R15])};
 #endif
-    const char* names[] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r14", "r15"};
+    const char* names[] = {
+#if defined(__APPLE__) && defined(__aarch64__)
+        "x0", "x1", "x2", "x3", "x28", "x29", "x30", "sp"
+#else
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r14", "r15"
+#endif
+    };
     for (int i = 0; i < 8; ++i) {
         std::fprintf(stderr, "Write log: %s=%#llx\n", names[i], (unsigned long long)regs[i]);
     }
     const char* sources[] = {"backing",      "WriteData",           "fence",
                              "EOP (decoded)", "WriteData (decoded)", "EOS (decoded)"};
-    const std::uint64_t now = __rdtsc();
+    const std::uint64_t now = Common::MonotonicNanoseconds();
     const auto print = [&](const Entry& e, const char* what) {
         std::fprintf(stderr,
                      "Write log: %s %s %#llx +%llu first %#llx tid %u, %.3f s before the fault\n",
                      what, e.source < 6 ? sources[e.source] : "?", (unsigned long long)e.address,
                      (unsigned long long)e.size, (unsigned long long)e.first, e.tid,
-                     double(now - e.tsc) / 3.0e9);
+                     double(now - e.timestamp_ns) / 1.0e9);
     };
     const std::uint64_t nh = hits_head.load();
     for (std::uint64_t i = nh > hits.size() ? nh - hits.size() : 0; i < nh; ++i) {

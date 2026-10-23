@@ -6,6 +6,8 @@
 #include "gow3_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
+#include "common/host_timing.h"
+#include "common/thread_id.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -404,7 +406,7 @@ bool Rasterizer::OnStageA() const {
 }
 
 namespace {
-/// Stage A: cycles waited per drain site (GOW3_FRAME_STATS), keyed by function name and line.
+/// Stage A: nanoseconds waited per drain site (GOW3_FRAME_STATS), keyed by function name and line.
 std::unordered_map<const char*, std::unordered_map<u32, u64>> drain_sites;
 } // namespace
 
@@ -417,9 +419,9 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
         draw_pipe->Drain(reason);
         return;
     }
-    const u64 before = draw_pipe->drain_cycles;
+    const u64 before = draw_pipe->drain_time_ns;
     draw_pipe->Drain(reason);
-    if (const u64 waited = draw_pipe->drain_cycles - before) {
+    if (const u64 waited = draw_pipe->drain_time_ns - before) {
         drain_sites[function][line] += waited;
     }
 }
@@ -837,29 +839,27 @@ void Rasterizer::PrintPipeStats() {
         return;
     }
     static auto window = std::chrono::steady_clock::now();
-    static u64 last_packets = 0, last_drains = 0, last_drain_cycles = 0, last_busy = 0;
-    static u64 last_tsc = __rdtsc();
+    static u64 last_packets = 0, last_drains = 0, last_drain_ns = 0, last_busy = 0;
     const auto now = std::chrono::steady_clock::now();
     const double seconds = std::chrono::duration<double>(now - window).count();
     if (seconds < 5.0) {
         return;
     }
-    const u64 tsc = __rdtsc();
-    const double cycles = double(tsc - last_tsc);
-    const u64 busy = draw_pipe->busy_cycles.load(std::memory_order_relaxed);
+    const double window_ns = seconds * 1.0e9;
+    const u64 busy = draw_pipe->busy_time_ns.load(std::memory_order_relaxed);
     std::printf("Draw pipe: %.0f draws/s pipelined, %.0f drains/s that waited, stage A waited "
                 "%.1f%%, stage B busy %.1f%%\n",
                 (draw_pipe->packets - last_packets) / seconds,
                 (draw_pipe->drains - last_drains) / seconds,
-                100.0 * (draw_pipe->drain_cycles - last_drain_cycles) / cycles,
-                100.0 * (busy - last_busy) / cycles);
+                100.0 * (draw_pipe->drain_time_ns - last_drain_ns) / window_ns,
+                100.0 * (busy - last_busy) / window_ns);
     std::printf("  drains by reason/s:");
     for (u32 r = 0; r < DrawPipe::NumReasons; ++r) {
         if (const u64 n = draw_pipe->drains_by_reason[r]) {
             static constexpr const char* names[] = {"ConstRam", "commands", "compute",
                                                     "submission end", "draw", "rasterizer"};
-            const double share = 100.0 * draw_pipe->cycles_by_reason[r] / cycles;
-            draw_pipe->cycles_by_reason[r] = 0;
+            const double share = 100.0 * draw_pipe->wait_ns_by_reason[r] / window_ns;
+            draw_pipe->wait_ns_by_reason[r] = 0;
             if (r < 256) {
                 std::printf(" %s=%.0f (%.1f%%)",
                             magic_enum::enum_name(AmdGpu::PM4ItOpcode(r)).data(), n / seconds,
@@ -872,8 +872,8 @@ void Rasterizer::PrintPipeStats() {
     std::printf("\n  stage A waits over 0.5%%:");
     for (const auto& [function, lines] : drain_sites) {
         for (const auto& [line, waited] : lines) {
-            if (waited * 200 > cycles) {
-                std::printf(" %s:%u %.1f%%", function, line, 100.0 * waited / cycles);
+            if (waited * 200 > window_ns) {
+                std::printf(" %s:%u %.1f%%", function, line, 100.0 * waited / window_ns);
             }
         }
     }
@@ -881,10 +881,9 @@ void Rasterizer::PrintPipeStats() {
     drain_sites.clear();
     draw_pipe->drains_by_reason = {};
     window = now;
-    last_tsc = tsc;
     last_packets = draw_pipe->packets;
     last_drains = draw_pipe->drains;
-    last_drain_cycles = draw_pipe->drain_cycles;
+    last_drain_ns = draw_pipe->drain_time_ns;
     last_busy = busy;
 }
 
@@ -1573,13 +1572,13 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             window = now;
             const double forks = std::max<double>(1, helper_full + helper_partial);
             std::printf("Texture helper: %llu binds in parallel, %llu partly, %llu serial; "
-                        "per fork %.0f cycles helper task, %.0f cycles GPU thread wait\n",
+                        "per fork %.0f ns helper task, %.0f ns GPU thread wait\n",
                         static_cast<unsigned long long>(helper_full),
                         static_cast<unsigned long long>(helper_partial),
                         static_cast<unsigned long long>(helper_serial),
-                        bind_helper.task_cycles.exchange(0) / forks,
-                        bind_helper.wait_cycles / forks);
-            bind_helper.wait_cycles = 0;
+                        bind_helper.task_time_ns.exchange(0) / forks,
+                        bind_helper.wait_time_ns / forks);
+            bind_helper.wait_time_ns = 0;
             helper_full = helper_partial = helper_serial = 0;
         }
     }

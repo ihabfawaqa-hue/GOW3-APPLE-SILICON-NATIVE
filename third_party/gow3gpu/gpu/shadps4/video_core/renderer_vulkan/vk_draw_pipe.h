@@ -20,9 +20,10 @@
 #include <cstring>
 #include <memory>
 #include <thread>
-#include <x86intrin.h>
 
 #include "common/assert.h"
+#include "common/host_timing.h"
+#include "common/thread_id.h"
 #include "common/thread.h"
 #include "common/types.h"
 
@@ -99,7 +100,7 @@ public:
         NumReasons,
     };
     std::array<u64, NumReasons> drains_by_reason{};
-    std::array<u64, NumReasons> cycles_by_reason{};
+    std::array<u64, NumReasons> wait_ns_by_reason{};
 
     /// Stage A: waits until stage B has run every committed packet.
     void Drain(u32 reason = ReasonRasterizer) {
@@ -109,17 +110,17 @@ public:
         ++drains;
         const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
         ++drains_by_reason[slot];
-        const u64 start = __rdtsc();
+        const u64 start = Common::MonotonicNanoseconds();
         for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
             if (spins < 4096) {
-                __builtin_ia32_pause();
+                Common::CpuRelax();
             } else {
                 std::this_thread::yield();
             }
         }
-        const u64 waited = __rdtsc() - start;
-        drain_cycles += waited;
-        cycles_by_reason[slot] += waited;
+        const u64 waited = Common::MonotonicNanoseconds() - start;
+        drain_time_ns += waited;
+        wait_ns_by_reason[slot] += waited;
     }
 
     /// Stage A: position after the last committed packet; Reached(position) once B ran it.
@@ -134,10 +135,10 @@ public:
         return consumed.load(std::memory_order_acquire) == head;
     }
 
-    /// Statistics (stage A): packets, drains that had to wait, cycles waited, cycles stage B
-    /// spent running packets.
-    u64 packets = 0, drains = 0, drain_cycles = 0;
-    std::atomic<u64> busy_cycles{0};
+    /// Statistics (stage A): packets, drains that had to wait, nanoseconds waited, and stage B
+    /// time spent running packets.
+    u64 packets = 0, drains = 0, drain_time_ns = 0;
+    std::atomic<u64> busy_time_ns{0};
 
 private:
     struct Header {
@@ -152,14 +153,14 @@ private:
 
     void WaitForSpace(u64 at, u64 size) {
         while (at + size - consumed.load(std::memory_order_acquire) > Capacity) {
-            __builtin_ia32_pause();
+            Common::CpuRelax();
         }
     }
 
     void Run(std::stop_token stop) {
         Common::SetCurrentThreadName("gow3:DrawRec");
         on_stage_b = true;
-        stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
+        stage_b_tid.store(static_cast<u32>(Common::CurrentThreadId()), std::memory_order_release);
         u64 at = 0;
         while (true) {
             // Packets follow each other within microseconds while a frame is decoded: spin,
@@ -179,7 +180,7 @@ private:
                     if (stop.stop_requested()) {
                         return;
                     }
-                    __builtin_ia32_pause();
+                    Common::CpuRelax();
                     if (!(spins & 255) && std::chrono::steady_clock::now() >= spin_until) {
                         const u32 seen = wake.load(std::memory_order_seq_cst);
                         sleeping.store(true, std::memory_order_seq_cst);
@@ -198,9 +199,10 @@ private:
                 consumed.store(at, std::memory_order_release);
                 continue;
             }
-            const u64 start = __rdtsc();
+            const u64 start = Common::MonotonicNanoseconds();
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
-            busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+            busy_time_ns.fetch_add(Common::MonotonicNanoseconds() - start,
+                                   std::memory_order_relaxed);
             at += header->size;
             consumed.store(at, std::memory_order_release);
         }

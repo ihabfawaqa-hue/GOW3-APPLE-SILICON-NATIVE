@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // gow3: helper thread sizing. Counts follow the hardware threads this process may run on
-// (the affinity mask, so `taskset` can emulate a Steam Deck), and speculative helpers run as
-// SCHED_IDLE: they use cores the game leaves idle and never take time from its threads.
+// (the affinity mask where available), and speculative helpers run at background priority so
+// they do not take scheduling time from the guest.
 
 #pragma once
 
@@ -10,6 +10,9 @@
 #ifdef _WIN32
 #include <bit>
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <pthread.h>
+#include <pthread/qos.h>
 #else
 #include <sched.h>
 #include <sys/resource.h>
@@ -31,6 +34,18 @@ inline unsigned Available() {
 inline void MakeBackground() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
 }
+#elif defined(__APPLE__)
+
+/// Hardware threads available to the process.
+inline unsigned Available() {
+    return std::max(1u, std::thread::hardware_concurrency());
+}
+
+/// Keep speculative worker activity below interactive guest threads.
+inline void MakeBackground() {
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+}
+
 #else
 
 /// Hardware threads available to the process.

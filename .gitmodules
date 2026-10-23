@@ -1,0 +1,15 @@
+[submodule "third_party/gow3gpu/gpu/third_party/fsr-vulkan"]
+	path = third_party/gow3gpu/gpu/third_party/fsr-vulkan
+	url = https://github.com/FireBurn/FSR-Vulkan.git
+[submodule "third_party/gow3gpu/gpu/third_party/imgui"]
+	path = third_party/gow3gpu/gpu/third_party/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "third_party/gow3gpu/gpu/third_party/magic_enum"]
+	path = third_party/gow3gpu/gpu/third_party/magic_enum
+	url = https://github.com/Neargye/magic_enum.git
+[submodule "third_party/gow3gpu/gpu/third_party/miniz"]
+	path = third_party/gow3gpu/gpu/third_party/miniz
+	url = https://github.com/richgel999/miniz.git
+[submodule "third_party/gow3gpu/gpu/third_party/xbyak"]
+	path = third_party/gow3gpu/gpu/third_party/xbyak
+	url = https://github.com/herumi/xbyak.git

@@ -260,15 +260,20 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     LOG_INFO(Render_Vulkan, "Creating vulkan instance");
 
 #if defined(__APPLE__)
-    // Initialize the environment with the path to the included ICD, so that the loader will
-    // find it.
-    static const auto icd_path = [] {
+    // Prefer an explicitly selected ICD or standard loader discovery. Packaged
+    // builds may place a MoltenVK manifest beside the executable; only point the
+    // loader there when that manifest actually exists.
+    static const auto bundled_icd_manifest = [] {
         char path[PATH_MAX];
         u32 length = PATH_MAX;
         _NSGetExecutablePath(path, &length);
-        return std::filesystem::path(path).parent_path();
+        const auto candidate = std::filesystem::path(path).parent_path() / "MoltenVK_icd.json";
+        return std::filesystem::exists(candidate) ? candidate : std::filesystem::path{};
     }();
-    setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
+    if (!std::getenv("VK_DRIVER_FILES") && !std::getenv("VK_ICD_FILENAMES") &&
+        !bundled_icd_manifest.empty()) {
+        setenv("VK_DRIVER_FILES", bundled_icd_manifest.c_str(), 0);
+    }
 #endif
 
     static vk::detail::DynamicLoader dl;
@@ -292,6 +297,26 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     if (Dlss* dlss = Dlss::Get()) {
         dlss->AppendInstanceExtensions(extensions);
     }
+
+    vk::InstanceCreateFlags instance_flags{};
+#if defined(__APPLE__)
+    // MoltenVK advertises its physical device only when the portability
+    // enumeration extension and create flag are both enabled.
+    const auto [instance_extensions_result, instance_extensions] =
+        vk::enumerateInstanceExtensionProperties();
+    ASSERT_MSG(instance_extensions_result == vk::Result::eSuccess,
+               "Failed to query Vulkan instance extensions: {}",
+               vk::to_string(instance_extensions_result));
+    const bool portability_enumeration = std::ranges::any_of(
+        instance_extensions, [](const vk::ExtensionProperties& extension) {
+            return extension.extensionName ==
+                   std::string_view{VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME};
+        });
+    if (portability_enumeration) {
+        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        instance_flags |= vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
+    }
+#endif
 
     const vk::ApplicationInfo application_info = {
         .pApplicationName = "shadPS4",
@@ -406,6 +431,7 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 
     vk::StructureChain<vk::InstanceCreateInfo, vk::LayerSettingsCreateInfoEXT> instance_ci_chain = {
         vk::InstanceCreateInfo{
+            .flags = instance_flags,
             .pApplicationInfo = &application_info,
             .enabledLayerCount = static_cast<u32>(layers.size()),
             .ppEnabledLayerNames = layers.data(),

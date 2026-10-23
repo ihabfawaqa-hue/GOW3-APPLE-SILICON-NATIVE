@@ -1,0 +1,11 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) buffer Result {
+    uint value;
+} result_buffer;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D result_image;
+
+void main() {
+    result_buffer.value = 0x47573321u;
+    imageStore(result_image, ivec2(0, 0), vec4(1.0, 0.5, 0.25, 1.0));
+}

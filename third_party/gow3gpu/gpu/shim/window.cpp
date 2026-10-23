@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_metal.h>
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
@@ -24,11 +25,28 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+#ifdef __APPLE__
+    // The pinned renderer creates VK_EXT_metal_surface directly from SDL's
+    // CAMetalLayer. Asking SDL to create a Vulkan window also makes SDL load
+    // its own portability library, which is not the selected Vulkan ICD.
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_METAL_BOOLEAN, true);
+#else
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+#endif
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
+#ifdef __APPLE__
+    // SDL's Cocoa view and CAMetalLayer are AppKit objects and must be created
+    // on the process main thread. gow3gpu_init marshals construction there.
+    const SDL_MetalView view = SDL_Metal_CreateView(window);
+    ASSERT_MSG(view, "Failed to create Cocoa Metal view: {}", SDL_GetError());
+    metal_view = view;
+    window_info.type = WindowSystemType::Metal;
+    window_info.render_surface = SDL_Metal_GetLayer(view);
+    ASSERT_MSG(window_info.render_surface, "Failed to get Cocoa CAMetalLayer: {}", SDL_GetError());
+#endif
     // gow3: the game's own icon (run.py converts sce_sys/icon0.png to BMP, SDL's built-in format).
     if (const char* icon_path = std::getenv("GOW3_WINDOW_ICON")) {
         if (SDL_Surface* icon = SDL_LoadBMP(icon_path)) {
@@ -39,12 +57,25 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
-#ifdef _WIN32
+#ifdef __APPLE__
+    ASSERT_MSG(driver && std::strcmp(driver, "cocoa") == 0,
+               "Expected SDL Cocoa video driver, got {}", driver ? driver : "(none)");
+#elif defined(_WIN32)
     if (driver && !std::strcmp(driver, "windows")) {
         window_info.type = WindowSystemType::Windows;
         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-    } else
-#endif
+    } else if (driver && !std::strcmp(driver, "x11")) {
+        window_info.type = WindowSystemType::X11;
+        window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
+        window_info.render_surface = reinterpret_cast<void*>(SDL_GetNumberProperty(wp, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
+    } else if (driver && !std::strcmp(driver, "wayland")) {
+        window_info.type = WindowSystemType::Wayland;
+        window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr);
+        window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr);
+    } else {
+        UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
+    }
+#else
     if (driver && !std::strcmp(driver, "x11")) {
         window_info.type = WindowSystemType::X11;
         window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
@@ -56,6 +87,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     } else {
         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
     }
+#endif
     // gow3: GOW3_FULLSCREEN=1 (older launchers) still asks for fullscreen.
     if (const char* fullscreen = std::getenv("GOW3_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
         Gow3Settings::Get().display_mode == Gow3Graphics::Windowed) {
@@ -88,6 +120,11 @@ void WindowSDL::ApplyDisplayMode(int mode) {
 }
 
 WindowSDL::~WindowSDL() {
+#ifdef __APPLE__
+    if (metal_view) {
+        SDL_Metal_DestroyView(static_cast<SDL_MetalView>(metal_view));
+    }
+#endif
     SDL_DestroyWindow(window);
 }
 

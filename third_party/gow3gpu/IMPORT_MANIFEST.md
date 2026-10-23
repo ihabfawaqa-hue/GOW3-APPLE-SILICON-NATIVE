@@ -59,11 +59,13 @@ These are local port patches in the isolated branch, not upstream commits. They 
 | Embedded overlay font | Use Mach-O section naming and leading-underscore assembly symbols |
 | PM4 address decode | Select pointer vs integer conversion at compile time instead of forming an invalid pointer cast on arm64 |
 | Vulkan portability | On Apple, request `VK_KHR_portability_enumeration` and its instance flag when advertised; enable `VK_KHR_portability_subset` at device creation when the device advertises it |
+| Cocoa presentation | Create the SDL Cocoa window and CAMetalLayer on the process main thread, pass the layer to the pinned `VK_EXT_metal_surface` path, and pump SDL events from a main-queue timer. Avoid SDL's Vulkan-window loader path so `VK_DRIVER_FILES` selects the renderer's Vulkan ICD. |
+| Empty instance-layer diagnostics | Treat a successful query with zero installed Vulkan layers as normal availability information, not a failed query. |
 | Guest-memory boundary | Replace GPU-side `VAddr` host-pointer dereferences with versioned guest-VA callbacks for range checks, sparse reads, host-to-guest fault mapping, atomic PM4 waits/semaphores, write-back, protection, and mapping invalidation hooks |
 | Guest shader lifetime | Snapshot program bytes through the guest-memory service and retain shared ownership through cached `Shader::Info` and geometry pipeline selection |
 | PM4 debug capture | Snapshot indirect command buffers through the checked guest-memory API, with a 64 MiB cap, rather than treating their guest VA as a host pointer |
 
-No local workaround removes a renderer-required robustness feature. The M2 probe still rejects the source's required device feature set.
+No local workaround removes a renderer-required robustness feature. MoltenVK still rejects the source's required device feature set; the source-built KosmicKrisp ICD passes the source-derived requirement check and representative workloads.
 
 ## Build and ABI evidence
 
@@ -76,15 +78,18 @@ No local workaround removes a renderer-required robustness feature. The M2 probe
 | ABI registration smoke | PASS: test loader registered 43 kernel/AVPlayer symbols, resolved `D0OdFMjp46I` (`sceKernelCreateEqueue`), and returned zero for an unknown NID |
 | Guest-memory API unit test | PASS: `guest-memory-api-test` validates callback requirements and one-time install, guest mapping, reverse host-address lookup, acquire atomic reads, acquire-release semaphore updates, sparse reads, streaming hash equivalence, checked write-back, GPU protection/hooks, invalid-range rejection, and failure behavior; native arm64 executable exits 0 |
 | Candidate memory callback imports | PASS for memory surface: `nm -u libgow3gpu.dylib` shows no `runtime_memory_*` imports; the tested v1 callback interface replaces that legacy contract in the candidate |
-| GPU initialization/teardown | NOT TESTED: `gow3gpu_init` immediately creates a Vulkan presenter through GnmDriver registration; the M2 lacks required features. The current C ABI has no shutdown function, and its window thread calls `_Exit(0)` when the window closes. |
+| Standalone renderer initialization | PASS, limited: `gow3gpu_init` constructed the Cocoa `CAMetalLayer`, KosmicKrisp Vulkan instance/device, presenter, and GNM/VideoOut registrations on Apple M2. The smoke uses a synthetic empty guest-memory map and submits no guest commands. |
+| Renderer teardown | NOT TESTED: the C ABI has no shutdown function and does not coordinate Presenter, kernel-service, dispatch-timer, and SDL destruction. The bounded smoke ends its own process after initialization. |
 | Remaining runtime callbacks | BLOCKED: `nm -u` shows 9 unresolved non-memory names: `runtime_disabled_optimizations`, `runtime_errno`, `runtime_fault_recover`, `runtime_file_translate`, `runtime_process_time_counter`, `runtime_process_time_us`, `runtime_restart`, `runtime_thread_attach_host`, and `runtime_tsc_frequency`. The primary runtime does not yet supply these, install the v1 memory API, or call the imported HLE. Synthetic API tests do not validate primary-runtime integration. |
 | Production link/real GNM submission | NOT TESTED: this branch has not replaced the placeholder bridge or active Metal backend in `ps4_app`. |
 
 The test-only callback stubs live in `scripts/lab/probes/gow3gpu/runtime_contract_stubs.cpp`; they must never be linked into the application.
 
-## Vulkan probe result on the M2
+## Vulkan probe results on the M2
 
-The source-derived probe is `scripts/lab/probes/vulkan/`; its README records invocation and interpretation. The measured comparison driver is MoltenVK 1.4.2 on Apple M2, Vulkan API 1.3.357, driver version 0.2.2210. KosmicKrisp is not installed. The verified LunarG SDK archive installer previously crashed in its macOS accessibility bridge before component selection; license acceptance was not bypassed.
+The source-derived probe is `scripts/lab/probes/vulkan/`; its README records invocation and interpretation. Mesa/KosmicKrisp was built from Mesa revision `09a9fae26d5df276a23b3f66050cd0d1d227800a`, installed only under `/tmp`, and tested with `VK_DRIVER_FILES`. The Apple M2 / KosmicKrisp / Vulkan 1.4.363 probe passes renderer-required extensions and features, presentation, storage-image compute/readback, offscreen barriers/readback, and aliased-image reinterpretation. The standalone presenter initialization also passes. The report and build logs are local at `/Users/ihabfawaqa/Library/Application Support/GOW3Lab/runs/vulkan_20261023_kosmickrisp_m2/`; init logs are in the sibling `gow3gpu_init_20261023_m2_kosmickrisp/` run.
+
+MoltenVK 1.4.2 remains a comparison result, not the selected driver. It passes diagnostic workloads but lacks `robustBufferAccess2` and `nullDescriptor`. No Vulkan SDK license flow was bypassed; the KosmicKrisp ICD was built from Mesa source.
 
 | Capability/workload | MoltenVK result |
 |---|---|
@@ -101,6 +106,19 @@ The source-derived probe is `scripts/lab/probes/vulkan/`; its README records inv
 | D16_UNORM_S8_UINT and D24_UNORM_S8_UINT image formats | Unsupported by the probed device |
 | D32_SFLOAT_S8_UINT image format | Supported. The source falls back from D16S8 to D32S8 when D24S8 is also unavailable; guest depth interpretation and readback semantics remain unverified. |
 | Aggregate verdict | PARTIAL; process exits 1 because the real renderer's required feature/device creation gate fails |
+
+KosmicKrisp API 1.4.363, driver 26.99.99, Apple M2:
+
+| Capability/workload | KosmicKrisp result |
+|---|---|
+| Source-required extension and feature checks; strict source device creation | PASS |
+| SDL Cocoa window, CAMetalLayer, and source Vulkan presenter initialization | PASS; no guest commands submitted |
+| Swapchain acquire/submit/present | PASS |
+| Push-descriptor compute, storage-image and host readback | PASS |
+| Offscreen clear, barrier, fence, and readback | PASS |
+| Shared-allocation image alias and view reinterpretation | PASS |
+| D16S8 and D24S8 image formats | Unsupported; D32S8 is supported. Guest depth conversion/sampling/readback still needs a game-resource test. |
+| Aggregate verdict | PASS for the tested source requirements and workloads; full guest rendering is NOT TESTED |
 
 The passing diagnostic workloads establish useful host capabilities but do not validate the pinned renderer or any PS4 workload. The report is machine-readable at `/tmp/gow3-moltenvk-probe.json`; it and game-derived captures remain outside Git.
 

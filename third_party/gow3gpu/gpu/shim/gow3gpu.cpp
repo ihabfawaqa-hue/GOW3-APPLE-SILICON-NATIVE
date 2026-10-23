@@ -24,6 +24,10 @@
 #include <thread>
 #include <vector>
 #include <SDL3/SDL.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#include <pthread.h>
+#endif
 #include "../gow3gpu.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -337,21 +341,102 @@ s32 PS4_SYSV_ABI sceKernelUsleep(u32 microseconds) {
 } // namespace Libraries::Kernel
 
 namespace {
-// SDL video must be driven from one thread: the window lives on its own host thread.
+// Non-Apple SDL platforms keep their dedicated window thread. Cocoa objects and
+// SDL event polling are owned by the process main thread on macOS.
+#ifdef __APPLE__
+std::mutex g_window_mutex;
+dispatch_source_t g_window_event_source{};
+std::atomic<u32> g_display_refresh_hz{60};
+
+static void UpdateDisplayRefreshHzOnWindowThread() {
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
+    if (mode && mode->refresh_rate > 0) {
+        g_display_refresh_hz.store(u32(mode->refresh_rate + 0.5f), std::memory_order_relaxed);
+    }
+}
+
+struct WindowCreateRequest {
+    const std::string* title;
+    s32 width;
+    s32 height;
+    int result{-1};
+};
+
+Frontend::WindowSDL* GetWindow() {
+    std::scoped_lock lock{g_window_mutex};
+    return g_window;
+}
+
+static void PumpWindowEvents(void* context) {
+    auto* window = static_cast<Frontend::WindowSDL*>(context);
+    if (window && !window->PollEvents()) {
+        LOG_INFO(Frontend, "Window closed by user");
+        std::fflush(stdout);
+        std::_Exit(0);
+    }
+}
+
+static void CreateWindowOnMainThread(void* context) {
+    auto* request = static_cast<WindowCreateRequest*>(context);
+    auto* window = new Frontend::WindowSDL(request->width, request->height,
+                                           request->title->c_str());
+    UpdateDisplayRefreshHzOnWindowThread();
+    {
+        std::scoped_lock lock{g_window_mutex};
+        g_window = window;
+    }
+    g_window_event_source = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                    dispatch_get_main_queue());
+    if (!g_window_event_source) {
+        {
+            std::scoped_lock lock{g_window_mutex};
+            g_window = nullptr;
+        }
+        delete window;
+        request->result = -1;
+        return;
+    }
+    dispatch_source_set_event_handler_f(g_window_event_source, &PumpWindowEvents);
+    dispatch_set_context(g_window_event_source, window);
+    dispatch_source_set_timer(g_window_event_source, DISPATCH_TIME_NOW,
+                              5 * NSEC_PER_MSEC, NSEC_PER_MSEC);
+    dispatch_resume(g_window_event_source);
+    request->result = 0;
+}
+
+static int CreateWindow(const std::string& title, s32 width, s32 height) {
+    WindowCreateRequest request{&title, width, height, -1};
+    if (pthread_main_np()) {
+        CreateWindowOnMainThread(&request);
+    } else {
+        // ps4_app keeps its Cocoa event loop on the process main thread while
+        // recompiled guest code runs on a worker. Synchronous dispatch creates
+        // the NSWindow and CAMetalLayer before Vulkan builds the surface.
+        dispatch_sync_f(dispatch_get_main_queue(), &request, &CreateWindowOnMainThread);
+    }
+    return request.result;
+}
+#else
 std::thread g_window_thread;
 std::mutex g_window_mutex;
 std::condition_variable g_window_cv;
 bool g_window_ready;
+std::atomic<u32> g_display_refresh_hz{60};
+static void UpdateDisplayRefreshHzOnWindowThread() {
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
+    if (mode && mode->refresh_rate > 0) {
+        g_display_refresh_hz.store(u32(mode->refresh_rate + 0.5f), std::memory_order_relaxed);
+    }
+}
+Frontend::WindowSDL* GetWindow() {
+    std::scoped_lock lock{g_window_mutex};
+    return g_window;
+}
+#endif
 } // namespace
 
 u32 Gow3DisplayRefreshHz() {
-    static const u32 hz = [] {
-        const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
-        const u32 rate = mode && mode->refresh_rate > 0 ? u32(mode->refresh_rate + 0.5f) : 60;
-        std::printf("GPU: vblank follows the display refresh rate, %u Hz\n", rate);
-        return std::max<u32>(rate, 60);
-    }();
-    return hz;
+    return std::max<u32>(g_display_refresh_hz.load(std::memory_order_relaxed), 60);
 }
 
 #ifdef GOW3_PGO_GENERATE
@@ -391,10 +476,18 @@ extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
 #endif
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "God of War III";
-    const s32 width = config->width, height = config->height;
+    const s32 width = config->width > 0 ? config->width : 1920;
+    const s32 height = config->height > 0 ? config->height : 1080;
+#ifdef __APPLE__
+    if (CreateWindow(title, width, height) != 0) {
+        std::fprintf(stderr, "[gow3gpu] failed to create SDL Cocoa window on the main thread\n");
+        return -1;
+    }
+#else
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("gow3:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
+        UpdateDisplayRefreshHzOnWindowThread();
         {
             std::scoped_lock lock{g_window_mutex};
             g_window = window;
@@ -413,6 +506,7 @@ extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
         std::unique_lock lock{g_window_mutex};
         g_window_cv.wait(lock, [] { return g_window_ready; });
     }
+#endif
     Core::Loader::SymbolsResolver resolver;
     // GnmDriver creates the presenter that the VideoOut present thread uses.
     Libraries::GnmDriver::RegisterLib(&resolver);
@@ -503,14 +597,15 @@ extern "C" int gow3gpu_overlay_captures_input(void) {
 }
 
 extern "C" int gow3gpu_text_input_begin(const char* initial, const char* prompt) {
-    if (!g_window) return 0;
-    g_window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");
+    auto* window = GetWindow();
+    if (!window) return 0;
+    window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");
     return 1;
 }
 
 extern "C" int gow3gpu_choice_begin(const char* title, const char* const* items, const char* const* images,
                                     int count, int focus) {
-    if (!g_window || count <= 0) return 0;
+    if (!GetWindow() || count <= 0) return 0;
     // Pictures are decoded here, on the game's thread, before the list is shown.
     std::vector<Gow3Png::Image> pictures(count);
     for (int i = 0; images && i < count; ++i) {
@@ -528,9 +623,10 @@ extern "C" int gow3gpu_choice_poll(void) {
 }
 
 extern "C" int gow3gpu_text_input_poll(char* out, uint64_t size) {
-    if (!g_window) return 2;
+    auto* window = GetWindow();
+    if (!window) return 2;
     std::string text;
-    const int state = g_window->PollTextInput(text);
+    const int state = window->PollTextInput(text);
     if (size) {
         const size_t n = std::min<size_t>(text.size(), size - 1);
         std::memcpy(out, text.data(), n);

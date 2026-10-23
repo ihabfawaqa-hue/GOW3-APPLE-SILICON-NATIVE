@@ -1,5 +1,5 @@
-// gow3: the game window. Created by the VideoOut driver on first open; the
-// event pump runs on the port's window thread (see window.cpp).
+// gow3: SDL window for the Vulkan swapchain. Cocoa creation and event pumping
+// must run on macOS's process main thread.
 #pragma once
 #include <atomic>
 #include <mutex>
@@ -46,6 +46,7 @@ private:
     std::string text, text_prompt, base_title;
     void UpdateTextTitle();
     SDL_Window* window{};
+    void* metal_view{};
     WindowSystemInfo window_info{};
 };
 

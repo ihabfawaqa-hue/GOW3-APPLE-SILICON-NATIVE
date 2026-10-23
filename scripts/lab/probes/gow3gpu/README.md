@@ -10,4 +10,18 @@ cmake --build /tmp/gow3_gpu_abi_smoke_build -j4
 
 `runtime_contract_stubs.cpp` exists only to satisfy `dlopen` for this isolated registration test. Its functions do not model guest memory, page faults, timing, or restart behavior and must never be linked into `ps4_app`.
 
-This test does not call `gow3gpu_init`: the current init path constructs the Vulkan presenter during GNM registration, and the M2 fails required `robustBufferAccess2` and `nullDescriptor` features. The current candidate C ABI exposes no shutdown function; `gow3gpu_init` also detaches the window thread and the window-close path calls `_Exit(0)`. Therefore full renderer initialization and teardown remain untested and require a lifecycle patch plus a compatible device or a clean feature-failure path.
+## Renderer initialization smoke
+
+On macOS, this separate executable installs a synthetic empty guest-memory API, calls `gow3gpu_init`, constructs the pinned Vulkan presenter, registers the kernel service, then checks the GNM symbol table. It submits no guest work and does not validate renderer teardown.
+
+```sh
+cmake --build /tmp/gow3gpu-arm64-build --parallel 2
+cmake --build /tmp/gow3_gpu_abi_smoke_build --parallel 2 --target gow3gpu-renderer-init-smoke
+VK_DRIVER_FILES=/path/to/kosmickrisp_mesa_icd.aarch64.json \
+  /tmp/gow3_gpu_abi_smoke_build/gow3gpu-renderer-init-smoke \
+  /tmp/gow3gpu-arm64-build/libgow3gpu.dylib
+```
+
+The current M2 run passes with KosmicKrisp and selects the Apple M2 device. Its logs and result JSON are in `~/Library/Application Support/GOW3Lab/runs/gow3gpu_init_20261023_m2_kosmickrisp/`. The native renderer needs an SDL Cocoa window and `CAMetalLayer`; its macOS port creates those on the process main thread and pumps SDL events on the main dispatch queue. SDL's own Vulkan window path is not used; the pinned renderer creates `VK_EXT_metal_surface` from the SDL Metal layer.
+
+The candidate C ABI still exposes no shutdown function. The smoke process exits immediately after confirming initialization because the window timer and kernel service have no coordinated teardown yet. The first failed attempts and their logs are retained beside the passing run for diagnosis.

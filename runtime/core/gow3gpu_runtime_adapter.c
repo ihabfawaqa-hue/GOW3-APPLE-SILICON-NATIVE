@@ -66,7 +66,8 @@ static int guest_is_mapped(void *user_context, uint64_t address, uint64_t size) 
   if (!size)
     size = 1;
   RecompGuestMemoryLease lease;
-  if (!recomp_guest_memory_acquire_gpu(ctx, address, (size_t)size, &lease))
+  if (!recomp_guest_gpu_memory_acquire(ctx, address, (size_t)size, PROT_READ,
+                                      &lease))
     return 0;
   recomp_guest_memory_release(&lease);
   return 1;
@@ -82,7 +83,8 @@ static int guest_host_to_guest(void *user_context, const void *host_pointer,
   const uint64_t address = (uint64_t)(pointer - base);
   if (address < 0x10000ULL || address >= ctx->mem_size) return 0;
   RecompGuestMemoryLease lease;
-  if (!recomp_guest_memory_acquire_gpu(ctx, address, 1, &lease)) return 0;
+  if (!recomp_guest_gpu_memory_acquire(ctx, address, 1, PROT_READ, &lease))
+    return 0;
   recomp_guest_memory_release(&lease);
   *guest_address = address;
   return 1;
@@ -92,12 +94,8 @@ static int guest_read(void *user_context, uint64_t address, void *destination,
                       uint64_t size) {
   GuestContext *ctx = process_context(user_context);
   if (!destination || size > SIZE_MAX) return 0;
-  RecompGuestMemoryLease lease;
-  if (!recomp_guest_memory_acquire_gpu(ctx, address, (size_t)size, &lease))
-    return 0;
-  memcpy(destination, lease.host_pointer, (size_t)size);
-  recomp_guest_memory_release(&lease);
-  return 1;
+  return recomp_guest_gpu_memory_read(ctx, address, destination,
+                                      (size_t)size);
 }
 
 static int guest_atomic_load(void *user_context, uint64_t address, uint32_t size,
@@ -107,7 +105,8 @@ static int guest_atomic_load(void *user_context, uint64_t address, uint32_t size
       !ctx)
     return 0;
   RecompGuestMemoryLease lease;
-  if (!recomp_guest_memory_acquire_gpu(ctx, address, size, &lease)) return 0;
+  if (!recomp_guest_gpu_memory_acquire(ctx, address, size, PROT_READ, &lease))
+    return 0;
   const void *p = lease.host_pointer;
   switch (size) {
   case 1:
@@ -131,7 +130,8 @@ static int guest_atomic_u64(void *user_context, uint64_t address,
   if (!previous_value || (address & 7) || !ctx)
     return 0;
   RecompGuestMemoryLease lease;
-  if (!recomp_guest_memory_acquire_gpu(ctx, address, sizeof(uint64_t), &lease))
+  if (!recomp_guest_gpu_memory_acquire(
+          ctx, address, sizeof(uint64_t), PROT_READ | PROT_WRITE, &lease))
     return 0;
   uint64_t *p = (uint64_t *)lease.host_pointer;
   int success = 1;
@@ -170,12 +170,7 @@ static int guest_writeback(void *user_context, uint64_t address,
                            const void *source, uint64_t size) {
   GuestContext *ctx = process_context(user_context);
   if (!source || size > SIZE_MAX) return 0;
-  RecompGuestMemoryLease lease;
-  if (!recomp_guest_memory_acquire_gpu(ctx, address, (size_t)size, &lease))
-    return 0;
-  memmove(lease.host_pointer, source, (size_t)size);
-  recomp_guest_memory_release(&lease);
-  return 1;
+  return recomp_guest_gpu_memory_write(ctx, address, source, (size_t)size);
 }
 
 static uint64_t guest_clamp_range(void *user_context, uint64_t address,
@@ -206,8 +201,8 @@ static int guest_gpu_protect(void *user_context, uint64_t address, uint64_t size
   if (start < 0x10000ULL || end > ctx->mem_size || end <= start) return 0;
   const int protection = read ? (PROT_READ | (write ? PROT_WRITE : 0)) : PROT_NONE;
   RecompGuestMemoryLease lease;
-  if (!recomp_guest_memory_acquire_gpu(ctx, start, (size_t)(end - start),
-                                       &lease))
+  if (!recomp_guest_gpu_memory_acquire(ctx, start, (size_t)(end - start),
+                                       PROT_READ, &lease))
     return 0;
   const int result = mprotect(lease.host_pointer, (size_t)(end - start),
                               protection);

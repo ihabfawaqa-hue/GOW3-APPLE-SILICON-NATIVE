@@ -212,8 +212,8 @@ int main(void) {
   // A nested callback on the same thread models page-tracking fault handling
   // re-entering while a checked guest-memory range is leased.
   RecompGuestMemoryLease outer, inner;
-  if (!recomp_guest_memory_acquire_gpu(&ctx, 0x30000, 8, &outer) ||
-      !recomp_guest_memory_acquire_gpu(&ctx, 0x30008, 8, &inner))
+  if (!recomp_guest_gpu_memory_acquire(&ctx, 0x30000, 8, PROT_READ, &outer) ||
+      !recomp_guest_gpu_memory_acquire(&ctx, 0x30008, 8, PROT_READ, &inner))
     return fail("reentrant GPU guest-memory lease");
   recomp_guest_memory_release(&inner);
   if (pthread_mutex_trylock(&ctx.vm_mutex) != EBUSY ||

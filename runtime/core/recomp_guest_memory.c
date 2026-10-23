@@ -50,7 +50,8 @@ static void memory_unlock(GuestContext *proc) {
 }
 
 static bool range_is_accessible_locked(GuestContext *proc, uint64_t start,
-                                       uint64_t end, int access) {
+                                       uint64_t end, int access,
+                                       bool require_guest_access) {
   uint64_t cursor = start;
 
   while (cursor < end) {
@@ -60,30 +61,11 @@ static bool range_is_accessible_locked(GuestContext *proc, uint64_t start,
       extent = extent->next;
     if (!extent || extent->is_free || extent->size == 0)
       return false;
-    if ((extent->prot & access) != access)
+    if (require_guest_access && (extent->prot & access) != access)
       return false;
     if (extent->size > UINT64_MAX - extent->addr)
       return false;
 
-    const uint64_t extent_end = extent->addr + extent->size;
-    if (extent_end <= cursor)
-      return false;
-    cursor = end < extent_end ? end : extent_end;
-  }
-  return true;
-}
-
-static bool range_is_mapped_locked(GuestContext *proc, uint64_t start,
-                                   uint64_t end) {
-  uint64_t cursor = start;
-  while (cursor < end) {
-    GuestVMExtent *extent = proc->vm_extents;
-    while (extent && !(cursor >= extent->addr &&
-                       cursor - extent->addr < extent->size))
-      extent = extent->next;
-    if (!extent || extent->is_free || !extent->size ||
-        extent->size > UINT64_MAX - extent->addr)
-      return false;
     const uint64_t extent_end = extent->addr + extent->size;
     if (extent_end <= cursor)
       return false;
@@ -120,17 +102,16 @@ bool recomp_vm_split_extent_at(GuestContext *proc, uint64_t at) {
   return true;
 }
 
-static bool guest_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
-                                 size_t size, int access, bool check_access,
+static bool acquire_guest_memory(GuestContext *ctx, uint64_t guest_addr,
+                                 size_t size, int access,
+                                 bool require_guest_access,
                                  RecompGuestMemoryLease *lease) {
   if (!lease)
     return false;
   memset(lease, 0, sizeof(*lease));
 
   const int valid_access = PROT_READ | PROT_WRITE | PROT_EXEC;
-  if (!ctx || !size || !guest_addr ||
-      (check_access && (!access || (access & ~valid_access))) ||
-      (!check_access && access != 0))
+  if (!ctx || !size || !guest_addr || !access || (access & ~valid_access))
     return false;
 
   GuestContext *proc = process_context(ctx);
@@ -147,10 +128,8 @@ static bool guest_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
   // the extent and prevents remapping of a physical alias until release.
   if (!memory_lock(proc))
     return false;
-  const bool valid = check_access
-                         ? range_is_accessible_locked(proc, guest_addr, end,
-                                                      access)
-                         : range_is_mapped_locked(proc, guest_addr, end);
+  const bool valid = range_is_accessible_locked(
+      proc, guest_addr, end, access, require_guest_access);
   if (!valid) {
     memory_unlock(proc);
     return false;
@@ -167,15 +146,15 @@ static bool guest_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
 bool recomp_guest_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
                                  size_t size, int access,
                                  RecompGuestMemoryLease *lease) {
-  return guest_memory_acquire(ctx, guest_addr, size, access, true, lease);
+  return acquire_guest_memory(ctx, guest_addr, size, access, true, lease);
 }
 
-bool recomp_guest_memory_acquire_gpu(GuestContext *ctx, uint64_t guest_addr,
-                                     size_t size,
+bool recomp_guest_gpu_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
+                                     size_t size, int access,
                                      RecompGuestMemoryLease *lease) {
   if (guest_addr < 0x10000ULL)
     return false;
-  return guest_memory_acquire(ctx, guest_addr, size, 0, false, lease);
+  return acquire_guest_memory(ctx, guest_addr, size, access, false, lease);
 }
 
 void recomp_guest_memory_release(RecompGuestMemoryLease *lease) {
@@ -213,6 +192,34 @@ bool recomp_guest_memory_write(GuestContext *ctx, uint64_t guest_addr,
   recomp_guest_memory_release(&lease);
   if (ps4_gnm_notify_cpu_write)
     ps4_gnm_notify_cpu_write(guest_addr, size);
+  return true;
+}
+
+bool recomp_guest_gpu_memory_read(GuestContext *ctx, uint64_t guest_addr,
+                                  void *destination, size_t size) {
+  if (!destination)
+    return false;
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_gpu_memory_acquire(ctx, guest_addr, size, PROT_READ,
+                                       &lease))
+    return false;
+  memcpy(destination, lease.host_pointer, size);
+  recomp_guest_memory_release(&lease);
+  return true;
+}
+
+bool recomp_guest_gpu_memory_write(GuestContext *ctx, uint64_t guest_addr,
+                                   const void *source, size_t size) {
+  if (!source)
+    return false;
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_gpu_memory_acquire(ctx, guest_addr, size, PROT_WRITE,
+                                       &lease))
+    return false;
+  memmove(lease.host_pointer, source, size);
+  recomp_guest_memory_release(&lease);
+  // GPU writes have separate completion and cache-visibility rules. Do not
+  // report them as CPU writes through ps4_gnm_notify_cpu_write().
   return true;
 }
 

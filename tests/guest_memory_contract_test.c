@@ -164,6 +164,20 @@ int main(void) {
   CHECK(!snapshot.is_free && snapshot.prot == PROT_NONE);
   CHECK(snapshot.prev == NULL && snapshot.next == NULL);
   CHECK(!recomp_guest_memory_acquire(&ctx, page * 2 + 8, 16, PROT_READ, &lease));
+  // GPU access shares the committed allocation independently of guest CPU
+  // permissions, but cannot access a free extent.
+  CHECK(recomp_guest_gpu_memory_acquire(&ctx, page * 2 + 8, 16, PROT_READ,
+                                        &lease));
+  recomp_guest_memory_release(&lease);
+  const uint32_t gpu_value = 0x9182a3b4;
+  uint32_t gpu_observed = 0;
+  CHECK(recomp_guest_gpu_memory_write(&ctx, page * 2 + 32, &gpu_value,
+                                       sizeof(gpu_value)));
+  CHECK(recomp_guest_gpu_memory_read(&ctx, page * 2 + 32, &gpu_observed,
+                                      sizeof(gpu_observed)));
+  CHECK(gpu_observed == gpu_value);
+  CHECK(!recomp_guest_gpu_memory_acquire(&ctx, page * 3 + 8, 16, PROT_READ,
+                                         &lease));
   CHECK(recomp_vm_set_protection(&ctx, page * 2, page, PROT_READ));
 
   // Read/write helpers preserve aliasing and invalidate renderer-side copies.
@@ -185,6 +199,6 @@ int main(void) {
   free_extents(&ctx);
   pthread_mutex_destroy(&ctx.vm_mutex);
   munmap(ctx.mem_base, memory_size);
-  puts("guest-memory-contract: PASS (translation, permissions, aliases, leases, overflow)");
+  puts("guest-memory-contract: PASS (CPU/GPU access, permissions, aliases, leases, overflow)");
   return 0;
 }

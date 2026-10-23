@@ -60,16 +60,20 @@ typedef struct RecompGuestMemoryLease {
 bool recomp_guest_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
                                  size_t size, int access,
                                  RecompGuestMemoryLease *lease);
-// GPU accesses use the same lifetime locks but are checked against mapped
-// extents rather than the guest CPU's read/write permission bits.
-bool recomp_guest_memory_acquire_gpu(GuestContext *ctx, uint64_t guest_addr,
-                                     size_t size,
+// GPU access validates that guest memory is committed and within the process
+// mapping, but intentionally ignores the guest CPU's logical page permissions.
+bool recomp_guest_gpu_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
+                                     size_t size, int access,
                                      RecompGuestMemoryLease *lease);
 void recomp_guest_memory_release(RecompGuestMemoryLease *lease);
 bool recomp_guest_memory_read(GuestContext *ctx, uint64_t guest_addr,
                               void *destination, size_t size);
 bool recomp_guest_memory_write(GuestContext *ctx, uint64_t guest_addr,
                                const void *source, size_t size);
+bool recomp_guest_gpu_memory_read(GuestContext *ctx, uint64_t guest_addr,
+                                  void *destination, size_t size);
+bool recomp_guest_gpu_memory_write(GuestContext *ctx, uint64_t guest_addr,
+                                   const void *source, size_t size);
 bool recomp_vm_query_extent(GuestContext *ctx, uint64_t addr,
                             GuestVMExtent *snapshot);
 bool recomp_guest_memory_query_region(GuestContext *ctx, uint64_t addr,

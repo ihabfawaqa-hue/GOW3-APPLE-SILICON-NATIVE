@@ -1,32 +1,36 @@
 # Engineering status
 
-Updated: 2026-10-23. Working branch: `luna/operation-spartan`. The original source tree had no Git metadata; local baseline commit `f786687` was created after excluding the guest image, generated game code, binaries, run captures, and backups. No remote is configured.
+Updated: 2026-10-23. Current worktree: `luna/gow3-runtime-integration` at `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`. Production remains `luna/operation-spartan`; the candidate backend has not been installed in that application.
 
 ## Current state
 
 | Area | Status | Evidence |
 |---|---|---|
-| Highest graphics milestone | **G2 user-reported; not automated** | The user reports the Sony and Santa Monica splashes display correctly. Existing captured frames after startup are corrupted. |
-| Active production renderer | **native Metal** | `sceGnmSubmitCommandBuffers` directly calls `ps4_gnm_metal_process_command_buffers`; VideoOut presents through `ps4_gnm_metal_present`. A prior local run logged an Apple M2 Metal device. |
-| GoW3 GPU bridge | **compiled, inactive placeholder** | `gow3gpu_bridge.o` is linked but no runtime source calls `gow3gpu_init`, `gow3gpu_submit_command_buffers`, or `gow3gpu_present`; the bridge forwards back to Metal. |
-| Shader path | **partial, opt-in Metal translation** | Vendored shadPS4 shader recompiler builds into the app; `GOW3_GCN=1` translates selected shaders to MSL and falls back on unsupported draws. This is not the shadPS4 Vulkan video core. |
-| Vulkan backend | **not present / not tested** | The binary has no Vulkan loader dependency. This host has Vulkan headers but no `vulkaninfo`, Vulkan loader, KosmicKrisp, or MoltenVK installation detected. |
-| Build graph | **PASS** | Two consecutive graph generations matched (SHA-256 `7a844db1e8d091d830eba76a6bcf61fb083a8300d8a4430cb5049e80a816066b`). An isolated clean build succeeded; a one-source edit rebuilt only its C object and the final link. `file`/`lipo` report arm64. |
-| Test laboratory | **PARTIAL** | Bounded `smoke` completed at its 45-second deadline. It captured 42 internal frames and partial draw/resource snapshots under `~/Library/Application Support/GOW3Lab/runs/run_20261023_120623_074376`. |
-| GoW3 GPU source | **PARTIAL** | Exact `gpu/`, `src/`, `tests/`, license, and README snapshot is present in this isolated integration worktree from `b907d8a9f2324ba5f514fbfe7de803e027c6ca26`. The three CPU regression tests pass as arm64 binaries. The full GPU source is not linked or built. |
-| Upstream GPU configure | **BLOCKED** | Native configure stops at `Could NOT find Vulkan (missing: Vulkan_LIBRARY)`; host has headers but no loader or driver. The upstream CMake path also requests X11 on Apple. |
-| Vulkan SDK acquisition | **BLOCKED** | Official 1.4.363.0 archive was checksum-verified, but advancing the Qt installer crashes in its macOS accessibility bridge before component selection. No SDK files were installed. |
-| Recognizable post-splash frame | **NOT ACHIEVED** | The latest internal capture is a measured all-black 1920×1080 frame; no capture is accepted as recognizable GoW3 imagery. |
+| Highest verified graphics milestone | **G2** | Internal captures visibly show the Sony opening card and Santa Monica Studio logo. The transition then produces an all-white sample and a half-black sample. No recognizable gameplay image is verified. |
+| Active production renderer | **native Metal** | Latest primary-project run `run_20261023_194648_251517` logged `native-metal` on Apple M2. The GoW3 Vulkan library was not loaded by the game. |
+| Latest bounded game run | **PARTIAL** | 45.387-second deadline; build PASS; ARM64; 44 internal frames; 44 presentations. Sample 840 is the last correct Santa Monica frame, sample 900 is the first sampled white frame, and sample 1200 is half-black. Image authenticity remains unverified. Logs and 44 screenshots are copied to `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-194648/`. |
+| Source-driven build graph | **PASS** | `tests/test_build_system_idempotence.py` passes; duplicate outputs are rejected; two graph generations are byte-identical. |
+| Candidate application build | **PASS** | A clean isolated `ninja -j4 ps4_app` completed all 315 actions and linked Mach-O arm64. A temporary one-source edit and restore each rebuilt only that C object and the final link. Generated game inputs were read-only symlinks from the primary checkout and remain untracked. |
+| GoW3 GPU import | **PASS, standalone** | Pinned source `b907d8a9f2324ba5f514fbfe7de803e027c6ca26`, shadPS4 base `b4e7ae776071ceb1dd35004577a8719481e1d258`, full native arm64 CMake build, exports, and ABI smokes verified. GoW3 alias, depth/stencil, and blend CPU regression tests pass. |
+| KosmicKrisp Vulkan | **PASS, bounded** | M2 feature/workload probe and standalone Cocoa/Vulkan presenter initialization pass required source-derived features, presentation, storage-image readback, barriers, and alias/view reinterpretation. Renderer init registers GNM symbols but submits no guest commands. |
+| MoltenVK | **PARTIAL / incompatible for renderer** | Diagnostic workloads work, but strict device creation fails on missing `robustBufferAccess2` and `nullDescriptor`. |
+| Runtime guest-memory adapter | **PARTIAL** | Synthetic tests cover bounds, allocated/free VM extents, sparse holes, atomics, writeback, map/unmap/invalidation, runtime callbacks, host page protection, and 16 KiB M2 page granularity. The game does not install this API. |
+| GNM dispatch / VideoOut | **NOT INTEGRATED** | `ps4_app` still dispatches GNM to the custom Metal path; candidate direct HLE pointers have no `GuestContext*` ABI adapter. Candidate and primary VideoOut/equeue ownership also remains unresolved. |
 
 ## Gate summary
 
 | Gate | Status | Next evidence needed |
 |---|---|---|
-| M0 protected baseline and deterministic ARM64 builds | **PASS** | Deterministic generation, clean detached worktree build, source-edit incremental rebuild, restore, and ARM64 verification passed. |
-| M1 splash and first-broken-frame regression | **PARTIAL** | The smoke lab runs and captures internally, but this run did not verify the user-reported splashes and ended on black. |
-| M2 standalone GoW3/shadPS4 GPU build | **PARTIAL** | Exact source snapshot is imported into this worktree and the three requested pure-CPU regression tests pass. Full GPU CMake configuration is blocked by missing Vulkan library. |
-| M3 Vulkan feature/workload probe | **BLOCKED** | Loader and candidate drivers are absent. SDK installer crashes before component selection. |
-| M4 guest GPU submissions through shadPS4 | **FAIL** | The live call graph currently reaches custom Metal only. |
-| M5–M14 | **NOT TESTED** | Depends on GPU backend integration and correct graphics. |
+| M0 protected baseline and deterministic ARM64 build | **PASS** | Candidate clean and incremental builds plus two-generation graph test pass. |
+| M1 automated splash/transition capture | **PARTIAL** | Both opening images and the first sampled bad frame are saved; exact content recognition and a PM4 rolling transition trace are not automated. |
+| M2 standalone pinned GoW3 GPU | **PASS** | Native library, required GoW3 regressions, ABI, and init smokes pass. Teardown and guest commands are not tested. |
+| M3 Vulkan feature/workload probe | **PASS, bounded** | KosmicKrisp passes the source-derived tested workload; guest depth semantics and full game rendering remain open. |
+| M4 real guest submissions through GoW3 GPU | **NOT TESTED** | Build a typed import adapter and demonstrate a real GNM submit reaches the candidate command processor. |
+| M5 guest memory, faults, EOP/events | **PARTIAL** | Synthetic adapter passes; install it in the process and verify a live protected-page fault, completion label, event, and waiter. |
+| M6 shader/texture validation | **NOT TESTED** | Capture actual guest shader and descriptors through the candidate backend and validate their contents. |
+| M7 deterministic replay | **NOT TESTED** | No complete guest submission capture exists. |
+| M8–M9 geometry, textures, multipass | **NOT TESTED** | Require a replayable guest workload and attachment evidence. |
+| M10 recognizable post-splash image | **FAIL** | Latest production capture is white/half-black after the Santa Monica splash. |
+| M11–M14 audio/video, menu/gameplay, sustained performance | **NOT TESTED** | Depend on correct guest rendering and real input/presentation integration. |
 
-Overall: **PARTIAL**. No graphics gate above G2 has been passed by build activity, draw counts, or CPU-side unit tests alone. The smoke run's backend was native Metal, not the GoW3 GPU.
+Overall: **PARTIAL**. Standalone Vulkan/device success and operation counters do not pass M4 or establish game graphics correctness.

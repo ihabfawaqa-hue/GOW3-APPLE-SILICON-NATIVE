@@ -1,29 +1,30 @@
 # Test matrix
 
-Updated: 2026-10-23. Status values are evidence-based; **NOT TESTED** is not a pass.
+Updated: 2026-10-23. Status is evidence-based. Synthetic and standalone tests are not game-rendering passes.
 
 | Gate | Test | Status | Evidence / remaining work |
 |---|---|---|---|
-| M0 | Existing executable architecture | **PASS** | `file` and `lipo -info ps4_app` report Mach-O arm64. |
-| M0 | Source-driven Ninja graph regeneration | **PASS** | Two consecutive generations produced SHA-256 `7a844db1e8d091d830eba76a6bcf61fb083a8300d8a4430cb5049e80a816066b`; build-graph tests verify unique outputs, language rules, and Ninja parsing. |
-| M0 | ARM64 link after regeneration | **PASS** | `ninja -j4 ps4_app` completed as a link-only step; `file ps4_app` and `lipo -info ps4_app` both confirm arm64. |
-| M0 | Incremental build after a source edit | **PASS** | In an isolated worktree, editing then restoring `runtime/kernel/syscalls/ps4_syscalls.c` rebuilt only that C object and the final link each time. |
-| M0 | Isolated clean build | **PASS** | Detached worktree built with four jobs and read-only links to 125 machine-local generated inputs; output is Mach-O arm64. |
-| M1 | Sony and Santa Monica splash rendering | **PARTIAL** | User-reported baseline; internal reference captures are not yet verified. |
-| M1 | Bounded smoke run and internal capture | **PARTIAL** | `python3 scripts/lab/iterate.py --mode smoke --runtime-seconds 45 --no-progress-seconds 25 --max-log-mb 32 --max-capture-mb 512` completed at deadline; 42 frames and a partial draw snapshot were saved under Application Support. Latest frame analysis: all black; both reported splash screens remain unverified by this run. |
-| M2 | GoW3 image-alias regression | **PASS** | Upstream `tests/test_aliasing.cpp`, compiled with `aliasing.cpp` and `host_compatibility.cpp` using native `clang++ -std=c++23`; output `aliasing-test: OK`; binary is Mach-O arm64. |
-| M2 | GoW3 scaled MIN/MAX blend regression | **PASS** | Upstream `tests/test_blend_rewrite.cpp`, native arm64 C++23; output `blend-rewrite-test: OK`. |
-| M2 | GoW3 effective depth/stencil regression | **PASS** | Upstream `tests/test_depth_stencil_state.cpp`, native arm64 C++23; output `depth-stencil-state-test: OK`. |
-| M2 | Full GoW3/shadPS4 video core on ARM64 | **BLOCKED** | Exact source configure stops at missing `Vulkan_LIBRARY`; no GPU runtime has been linked or initialized. |
-| M2 | C bridge initialization and teardown | **FAIL** | Existing bridge is a forwarding placeholder; no standalone GPU lifecycle. |
-| M3 | KosmicKrisp Vulkan feature/workload probe | **BLOCKED** | No SDK loader or driver is installed; upstream CMake cannot find `Vulkan_LIBRARY`. |
-| M3 | MoltenVK comparison probe | **BLOCKED** | No SDK loader or driver is installed. |
-| M4 | Guest GNM submission reaches shadPS4 GPU | **FAIL** | Source call graph reaches custom Metal directly. |
-| M5 | Guest memory, page faults, EOP and equeues | **NOT TESTED** | No integrated GPU memory/completion contract. |
-| M6 | Shader/texture correctness against captured guest resources | **NOT TESTED** | Existing texture and shader probes are incomplete and not full render tests. |
-| M7 | Deterministic GPU replay | **NOT TESTED** | Current utility decodes synthetic PM4 packet structure only. |
-| M8–M9 | Correct geometry, textures, multipass composition | **NOT TESTED** | No validated guest GPU replay or trusted image comparison. |
-| M10 | Recognizable post-splash image | **FAIL** | Latest bounded run capture is an all-black frame; no recognizable image is verified. |
-| M11–M14 | Audio/video, input, gameplay, performance | **NOT TESTED** | Must follow graphics correctness. |
+| M0 | Ninja output ownership and source language rules | **PASS** | `python3 tests/test_build_system_idempotence.py`: 316 unique outputs, distinct C/assembly/ObjC/ObjC++/C++/C++23 rules, one `gow3gpu_bridge.o`. |
+| M0 | Two generator runs | **PASS** | `tools/generate_build_ninja.py` run twice; byte hashes match. |
+| M0 | Clean isolated app build | **PASS** | `ninja -j4 ps4_app` completed 315 actions; output is Mach-O arm64. Generated local inputs came from read-only symlinks; no game assets entered Git. |
+| M0 | Incremental compilation | **PASS** | A temporary edit and restore of `runtime/core/ps4_sfo.c` each rebuilt that one object and relinked only `ps4_app`; log is in the local GOW3Lab memory-adapter run folder. |
+| M1 | Internal splash/transition capture | **PARTIAL** | Latest primary run saves both opening cards. Santa Monica sample 840 → first observed white sample 900 → half-black sample 1200. Human visual check confirms the cards; image recognition remains unverified. |
+| M1 | Bounded app smoke | **PASS, bounded** | `python3 scripts/lab/iterate.py --mode smoke --runtime-seconds 45 --screenshot-every 60`; deadline termination, no crash; 44 frames and partial GPU snapshot. |
+| M2 | Pinned GoW3 GPU full native build | **PASS** | Candidate CMake `gow3gpu` shared library compiles/links for arm64. |
+| M2 | GoW3 aliasing regression | **PASS** | `tests/test_aliasing.cpp` native arm64. |
+| M2 | Effective depth/stencil regression | **PASS** | `tests/test_depth_stencil_state.cpp` native arm64. |
+| M2 | Scaled MIN/MAX blend regression | **PASS** | `tests/test_blend_rewrite.cpp` native arm64. |
+| M2 | Candidate ABI and host runtime smoke | **PASS** | Candidate exports and resolver checked; runtime callbacks cover errno, time, VFS, thread attach/detach, restart and recoverable fault. |
+| M2 | Candidate Cocoa/Vulkan renderer initialization | **PASS, limited** | KosmicKrisp selects Apple M2, creates presenter and registers 327 GNM symbols. No guest command submitted; teardown not tested. |
+| M3 | KosmicKrisp source-derived feature/workload probe | **PASS, bounded** | Instance/device, required features, presentation, storage-image compute/readback, offscreen barriers and image alias/view reinterpretation pass. D16S8/D24S8 unavailable; guest depth semantics remain open. |
+| M3 | MoltenVK strict device creation | **FAIL** | Missing `robustBufferAccess2` and `nullDescriptor`. Its diagnostic workloads do not make it renderer-compatible. |
+| M4 | Live GNM submission to candidate | **NOT TESTED** | Primary app still calls custom Metal; typed import bridge is not implemented. |
+| M5 | Guest-memory adapter contract | **PASS, synthetic only** | Checks static/allocated/free ranges, sparse holes, reads/writeback, acquire atomics, map/unmap/invalidate callbacks, host page protection and M2 16 KiB tracker granularity. Not installed in a game process. |
+| M5 | Live GPU page fault, EOP, event and guest wakeup | **NOT TESTED** | No candidate command has executed in the app. |
+| M6 | Real shader and texture validation | **NOT TESTED** | No candidate guest shader/resource capture. |
+| M7 | Deterministic replay | **NOT TESTED** | No complete PM4/state/memory capture. |
+| M8–M9 | Geometry, texture sampling, multipass composition | **NOT TESTED** | Need a replayable candidate workload. |
+| M10 | Recognizable post-splash image | **FAIL** | Latest production screenshot sequence becomes white and half-black. |
+| M11–M14 | Audio/video, menu/gameplay, sustained performance | **NOT TESTED** | Follow graphics and presentation integration. |
 
-Available local fixture tests are diagnostic tools; a synthetic descriptor, packet, or shader fixture does not prove game rendering.
+Latest game evidence: `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-194648/`. Candidate synthetic/renderer tests: `~/Library/Application Support/GOW3Lab/runs/gow3gpu_memory_adapter_20261023_m2/`.

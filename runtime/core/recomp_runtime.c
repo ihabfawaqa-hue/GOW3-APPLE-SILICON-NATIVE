@@ -2,6 +2,7 @@
 #include "ps4_sysmodule.h"
 #include "ps4_vfs.h"
 #include "ps4_log.h"
+#include "gow3gpu_runtime_adapter.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -30,6 +31,10 @@ void recomp_set_current_ctx(GuestContext *ctx) {
 }
 
 static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
+  if ((sig == SIGSEGV || sig == SIGBUS) &&
+      ps4_gow3gpu_dispatch_fault(ucontext, si ? si->si_addr : NULL)) {
+    return;
+  }
   ps4_log_drain_sync(1.0); // pending output first, so the FATAL report below is not lost
   if (g_current_ctx) {
     fprintf(stderr,
@@ -1042,10 +1047,12 @@ uint64_t recomp_vm_alloc_named_aligned(GuestContext *ctx, size_t size,
     best->name[0] = '\0';
   }
   uint64_t res = best->addr;
+  size_t res_size = best->size;
   printf("[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x%llx\n",
          (unsigned long long)res);
   fflush(stdout);
   pthread_mutex_unlock(&proc->vm_mutex);
+  ps4_gow3gpu_guest_map(res, res_size);
   return res;
 }
 
@@ -1143,7 +1150,9 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
     curr->name[0] = '\0';
   }
 
+  size_t mapped_size = curr->size;
   pthread_mutex_unlock(&proc->vm_mutex);
+  ps4_gow3gpu_guest_map(aligned_addr, mapped_size);
   return aligned_addr;
 }
 
@@ -1263,6 +1272,7 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
   pthread_mutex_unlock(&proc->vm_mutex);
 
   for (size_t i = 0; i < k; i++) {
+    ps4_gow3gpu_guest_unmap(ranges[i].addr, ranges[i].size);
     ps4_direct_mem_on_unmap(proc, ranges[i].addr, ranges[i].size);
     if (proc->mem_base && ranges[i].addr + ranges[i].size <= proc->mem_size) {
 #if defined(__APPLE__) || defined(__linux__)

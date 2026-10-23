@@ -7,7 +7,11 @@ cmake -S scripts/lab/probes/gow3gpu -B /tmp/gow3_gpu_abi_smoke_build -DCMAKE_BUI
 cmake --build /tmp/gow3_gpu_abi_smoke_build -j4
 /tmp/gow3_gpu_abi_smoke_build/gow3gpu-abi-smoke /path/to/libgow3gpu.dylib
 /tmp/gow3_gpu_abi_smoke_build/gow3gpu-host-runtime-smoke /path/to/libgow3gpu.dylib
+/tmp/gow3_gpu_abi_smoke_build/gow3gpu-runtime-adapter-smoke
+/tmp/gow3_gpu_abi_smoke_build/gow3gpu-host-page-smoke
 ```
+
+`gow3gpu-runtime-adapter-smoke` compiles the runtime adapter against a synthetic `GuestContext` and exercises checked guest reads/writes, atomic synchronization, host callbacks, map/unmap/invalidate notifications, and host page protection. The image/argument prefix and non-free VM extents are accepted; free extents and ranges crossing into holes are rejected, while the sparse-read API reports holes for zero-fill. `gow3gpu-host-page-smoke` compares the vendored tracker page size with the running macOS page size; on the M2 both report 16 KiB. These are contract tests and do not submit real game commands.
 
 The candidate shared library owns its internal `runtime_*` entry points and routes host-owned services through the versioned `Gow3GpuHostRuntimeApi`. The `errno_address` callback supplies the host C-library thread's errno slot, not PS4 guest TLS. No executable-level `runtime_*` stubs are used. The smoke callbacks are test-only and do not model the primary guest-memory runtime. Configure the candidate GPU with `-DGOW3GPU_TEST_HOOKS=ON` to include the fault-recovery self-test hook; it is disabled in production builds.
 

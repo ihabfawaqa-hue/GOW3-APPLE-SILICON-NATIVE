@@ -8,7 +8,15 @@
 
 namespace VideoCore {
 
+// The tracker protects host pages with mprotect on Apple Silicon. macOS uses
+// 16 KiB VM pages on arm64, so its tracker granularity must match the host or
+// each protection change is invalid and adjacent 4 KiB states cannot be
+// represented independently by the OS page tables.
+#if defined(__APPLE__) && defined(__aarch64__)
+constexpr u64 TRACKER_PAGE_BITS = 14; // 16K host pages
+#else
 constexpr u64 TRACKER_PAGE_BITS = 12; // 4K pages
+#endif
 constexpr u64 TRACKER_BYTES_PER_PAGE = 1ULL << TRACKER_PAGE_BITS;
 
 constexpr u64 TRACKER_HIGHER_PAGE_BITS = 22; // each region is 4MB

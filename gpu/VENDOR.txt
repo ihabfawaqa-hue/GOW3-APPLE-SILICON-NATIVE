@@ -42,13 +42,23 @@ Vulkan loader/driver path and adaptation to this project's GuestContext ABI.
 Upstream revisions and licenses were inspected for integration planning only.
 No upstream source was copied into this working tree during this audit.
 
-UPDATE 2026-10-23: SHADER RECOMPILER VENDORED
----------------------------------------------
-The statements above describe the tree at audit time. The shadPS4 shader
-recompiler (GCN to IR to SPIR-V) is now vendored, unmodified apart from the
-listed port edits, under gpu/shadps4-recompiler/. Its pinned sources, licenses,
-local edits, and limits are in gpu/shadps4-recompiler/VENDOR.txt.
+UPDATE 2026-10-23: PINNED RECOMPILER AND FULL GPU CANDIDATE IMPORTED
+-------------------------------------------------------------------
+The preceding audit describes the tree before the isolated source-import
+commit. The shader recompiler used by the primary diagnostic path is vendored
+under gpu/shadps4-recompiler/. The complete candidate video core, Vulkan/SDL3
+backend, GoW3 GPU shims, tests, and source licenses are now present under
+third_party/gow3gpu/.
 
-The video core, the Vulkan/SDL3 backend, and the GoW3 bridge are still not
-imported. The live renderer (runtime/modules/libSceGnmDriver/ps4_gnm_metal.mm)
-still uses the heuristic MSL substitute and does not call the recompiler yet.
+The authoritative provenance, dependency revisions, local macOS/ARM64 patches,
+and standalone build evidence are in third_party/gow3gpu/IMPORT_MANIFEST.md.
+The imported candidate is isolated: it is not linked into ps4_app and has no
+live GNM import caller. The top-level gpu/gow3gpu.h and
+gpu/gow3gpu_bridge.cpp remain legacy diagnostic placeholders that forward to
+the native Metal renderer; their signatures are not the imported library ABI.
+Use third_party/gow3gpu/gpu/gow3gpu.h as the candidate C ABI reference.
+
+The candidate library builds for native arm64, but runtime integration remains
+blocked by the incompatible guest-memory address model, unresolved
+runtime_* callbacks, import-dispatch ABI, and MoltenVK's missing required
+robustness2 features. No production backend switch has been made.

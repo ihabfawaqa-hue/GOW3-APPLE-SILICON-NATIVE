@@ -32,13 +32,15 @@ except ImportError:
     _PILImage = None
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-RUNS_DIR = Path(os.environ.get("GOW3_LAB_RUNS", BASE_DIR / "runs")).expanduser().resolve()
+DEFAULT_RUNS_DIR = Path.home() / "Library/Application Support/GOW3Lab/runs"
+RUNS_DIR = Path(os.environ.get("GOW3_LAB_RUNS", DEFAULT_RUNS_DIR)).expanduser().resolve()
 DEFAULT_ASSETS = Path("/Volumes/1TB/gow3_cusa01623_extracted")
 SOURCE_FILES = [
     "build.ninja", "main.c", "Launch_GOW3.command", "fix_and_resume.sh",
     "runtime/core/recomp_runtime.c",
     "runtime/modules/libSceAjm/ps4_ajm.c",
     "tools/gow3_lab.py", "tools/gow3_gpu_replay.py", "tools/gow3_shader_tool.py",
+    "tools/generate_build_ninja.py", "tools/patch_build_ninja.py", "build_and_run.sh",
     "gpu/gow3gpu.h", "gpu/gow3gpu_bridge.cpp", "gpu/VENDOR.txt", "gpu/gow3_capture.h",
     "runtime/modules/libSceGnmDriver/ps4_gnm_metal.mm",
     "runtime/modules/libSceGnmDriver/ps4_gcn_recompiler.h",
@@ -126,6 +128,7 @@ def run_bounded(
     command: list[str], cwd: Path, env: dict[str, str], stdout_path: Path,
     stderr_path: Path | None, timeout_s: float, no_progress_s: float,
     max_log_bytes: int, max_rss_mb: int, progress_files: Path | None = None,
+    capture_dirs: list[Path] | None = None, max_capture_bytes: int = 512 * 1024 * 1024,
 ) -> dict[str, object]:
     start = time.monotonic()
     result: dict[str, object] = {
@@ -135,6 +138,7 @@ def run_bounded(
         "termination_reason": None,
         "duration_seconds": 0.0,
         "max_rss_mb": None,
+        "max_capture_bytes": 0,
     }
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_handle = open(stderr_path, "wb") if stderr_path else subprocess.STDOUT
@@ -164,8 +168,19 @@ def run_bounded(
                     max_rss = max(max_rss, rss)
                     result["max_rss_mb"] = round(max_rss, 1)
 
+                capture_bytes = 0
+                for directory in capture_dirs or []:
+                    if directory.exists():
+                        capture_bytes += sum(
+                            item.stat().st_size for item in directory.rglob("*")
+                            if item.is_file()
+                        )
+                result["max_capture_bytes"] = max(int(result["max_capture_bytes"]), capture_bytes)
+
                 if stdout_size + stderr_size > max_log_bytes:
                     reason = "log_size_limit"
+                elif capture_bytes > max_capture_bytes:
+                    reason = "capture_size_limit"
                 elif rss is not None and rss > max_rss_mb:
                     reason = "memory_limit"
                 elif now - start >= timeout_s:
@@ -187,6 +202,14 @@ def run_bounded(
     except OSError as exc:
         result["status"] = "START_FAILED"
         result["error"] = str(exc)
+        result["duration_seconds"] = round(time.monotonic() - start, 3)
+        return result
+    except KeyboardInterrupt:
+        if "proc" in locals():
+            stop_owned_process_group(proc)
+            result["exit_code"] = proc.poll()
+        result["status"] = "INTERRUPTED"
+        result["termination_reason"] = "user_interrupt"
         result["duration_seconds"] = round(time.monotonic() - start, 3)
         return result
     finally:
@@ -479,6 +502,9 @@ def parse_log_metrics(stdout: str, stderr: str) -> dict[str, object]:
     backend_match = re.search(r"Native Apple Metal GNM Command Processor initialized \(([^)]+)\)", text)
     vulkan_match = re.search(r"(?im)^.*(?:Vulkan device|Vulkan renderer|Vulkan backend)[: ]+([^\r\n]+)", text)
     heuristic_msl_pipelines = len(re.findall(r"Heuristic MSL substitute compiled", text))
+    gcn_selected = bool(re.search(r"GCN translated shader path: enabled", text, re.I))
+    gcn_draws = len(re.findall(r"\[gcn-debug\] draw VS=", text))
+    gcn_fallback_logs = re.findall(r"\[ps4-gnm-metal\] GCN fallback x(\d+) \(([^)]+)\)", text)
     shader_errors = re.findall(r"(?im)^.*(?:shader|pipeline).*(?:failed|error|unsupported).*$", text)
     unsupported_lines = re.findall(r"(?im)^.*(?:not implemented|unimplemented|unsupported).*$", text)
     unsupported = next((
@@ -508,7 +534,12 @@ def parse_log_metrics(stdout: str, stderr: str) -> dict[str, object]:
         "presentation_log_entries": len(presents),
         "latest_pm4_snapshot": snapshot,
         "heuristic_msl_pipeline_log_entries": heuristic_msl_pipelines,
-        "gcn_instruction_translation": "NOT_IMPLEMENTED",
+        "gcn_translation_path": "MSL_TRANSLATOR_SELECTED" if gcn_selected else "BUILT_OPT_IN_NOT_SELECTED",
+        "gcn_translated_draw_debug_records": gcn_draws,
+        "gcn_fallback_log_records": [
+            {"reported_occurrence": int(count), "reason": reason}
+            for count, reason in gcn_fallback_logs
+        ],
         "shader_pipeline_errors": shader_errors[:20],
         "first_unsupported_operation": unsupported.strip() if unsupported else None,
         "gpu_synchronization_state": "NOT_INSTRUMENTED",
@@ -529,19 +560,30 @@ def milestone_summary(stdout: str, stderr: str, gpu: dict[str, object]) -> dict[
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Build and run a bounded GOW3 smoke iteration through Launch_GOW3.command.",
+        description="Run one bounded GOW3 smoke iteration through Launch_GOW3.command.",
         epilog="Exit codes: 0 bounded run captured a frame; 2 build failure; 3 assets missing; 4 non-ARM64 binary; 5 start/stall; 6 crash; 7 no screenshot.",
     )
+    parser.add_argument("--mode", choices=("smoke",), default="smoke",
+                        help="Implemented lab mode: bounded startup and internal framebuffer capture.")
     parser.add_argument("--runtime-seconds", type=float, default=float(os.environ.get("GOW3_LAB_RUNTIME_SECONDS", "60")))
     parser.add_argument("--build-timeout-seconds", type=float, default=600)
     parser.add_argument("--build-no-progress-seconds", type=float, default=180)
     parser.add_argument("--no-progress-seconds", type=float, default=25)
     parser.add_argument("--screenshot-every", type=int, default=60)
     parser.add_argument("--max-log-mb", type=int, default=32)
+    parser.add_argument("--max-capture-mb", type=int, default=512)
     parser.add_argument("--max-rss-mb", type=int, default=8192)
     parser.add_argument("--skip-build", action="store_true", help="Use the existing binary; the default always runs Ninja first.")
     parser.add_argument("--build-only", action="store_true", help="Build and report architecture without starting the game.")
     args = parser.parse_args()
+    if not 1 <= args.runtime_seconds <= 300:
+        parser.error("--runtime-seconds must be between 1 and 300 for the bounded smoke mode")
+    if not 1 <= args.max_log_mb <= 128:
+        parser.error("--max-log-mb must be between 1 and 128")
+    if not 128 <= args.max_capture_mb <= 4096:
+        parser.error("--max-capture-mb must be between 128 and 4096")
+    if not 512 <= args.max_rss_mb <= 16384:
+        parser.error("--max-rss-mb must be between 512 and 16384")
 
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     run_id = f"run_{stamp}"
@@ -550,7 +592,9 @@ def main() -> int:
     (run_dir / "gpu-captures").mkdir()
     (run_dir / "failures").mkdir()
     baseline = {
+        "mode": args.mode,
         "run_id": run_id,
+        "runner_pid": os.getpid(),
         "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "repo_path": str(BASE_DIR),
         "git_revision": git_revision(),
@@ -558,7 +602,7 @@ def main() -> int:
         "source_sha256": source_fingerprints(),
         "host_architecture": platform.machine(),
         "host_platform": platform.platform(),
-        "renderer_configured": "native-metal (from current GNM source path)",
+        "renderer_configured": "native-metal (direct GNM/VideoOut path verified from source)",
         "selected_asset_directory": os.environ.get("GOW3_DIR", str(DEFAULT_ASSETS)),
         "stages": {},
     }
@@ -566,6 +610,7 @@ def main() -> int:
     print(f"RUN: {run_id}")
     print(f"REPO: {BASE_DIR}")
     print(f"ARTIFACTS: {run_dir}")
+    print(f"RUNNER_PID: {os.getpid()} (send SIGINT to stop this run safely)")
     if baseline["git_revision"] is None:
         print("REVISION: unavailable (directory has no Git metadata; source hashes recorded)")
 
@@ -673,13 +718,16 @@ def main() -> int:
     runtime_env["PS4_AJM_LOG"] = "1"
     audio_dump_path = run_dir / "audio-mix.wav"
     runtime_env["PS4_AUDIO_DUMP"] = str(audio_dump_path)
+    capture_host_resources(run_dir / "host-resources.txt", "before-runtime")
     runtime_result = run_bounded(
         ["/bin/bash", str(BASE_DIR / "Launch_GOW3.command")], BASE_DIR,
         runtime_env, run_dir / "stdout.log", run_dir / "stderr.log",
         args.runtime_seconds, args.no_progress_seconds,
         args.max_log_mb * 1024 * 1024, args.max_rss_mb,
-        progress_files=run_dir / "frames",
+        progress_files=run_dir / "frames", capture_dirs=[run_dir],
+        max_capture_bytes=args.max_capture_mb * 1024 * 1024,
     )
+    capture_host_resources(run_dir / "host-resources.txt", "after-runtime")
     baseline["stages"]["runtime"] = runtime_result
 
     stdout = (run_dir / "stdout.log").read_text(errors="replace")
@@ -710,10 +758,12 @@ def main() -> int:
     gpu["draw_capture_file_count"] = len(capture_files)
     write_json(run_dir / "gpu-summary.json", gpu)
     write_json(run_dir / "shader-summary.json", {
-        "status": "HEURISTIC_PIPELINE_ONLY" if gpu["heuristic_msl_pipeline_log_entries"] else "NOT_CONFIRMED",
+        "status": gpu["gcn_translation_path"],
         "heuristic_msl_pipeline_log_entries": gpu["heuristic_msl_pipeline_log_entries"],
-        "gcn_instruction_translation": "NOT_IMPLEMENTED",
-        "translation_correctness": "NOT_APPLICABLE_NO_GCN_TRANSLATOR",
+        "gcn_translated_draw_debug_records": gpu["gcn_translated_draw_debug_records"],
+        "gcn_fallback_log_records": gpu["gcn_fallback_log_records"],
+        "translation_correctness": "UNVERIFIED",
+        "backend": "Metal MSL; this is not the shadPS4 Vulkan GPU backend",
         "shader_errors": gpu["shader_pipeline_errors"],
     })
     thread_lines = [line for line in full_text.splitlines() if re.search(r"thread|stall|watchdog|deadlock", line, re.I)]
@@ -762,7 +812,10 @@ def main() -> int:
     baseline["first_unsupported_operation"] = gpu["first_unsupported_operation"]
     baseline["warnings_and_errors"] = [line for line in full_text.splitlines() if re.search(r"warning|error|fatal|unimplemented|unsupported", line, re.I)][:80]
 
-    if runtime_result["status"] == "CRASHED":
+    if runtime_result["status"] == "INTERRUPTED":
+        verdict, exit_code = "PARTIAL", 130
+        blocker = "Run was stopped by the operator; only the child process group started by this runner was terminated."
+    elif runtime_result["status"] == "CRASHED":
         verdict, exit_code = "FAIL", 6
         blocker = "Application exited with a nonzero status before the bounded run ended."
     elif runtime_result["status"] == "START_FAILED":
@@ -771,18 +824,18 @@ def main() -> int:
     elif runtime_result["termination_reason"] == "no_progress":
         verdict, exit_code = "FAIL", 5
         blocker = "Application made no log or screenshot progress before the watchdog deadline."
-    elif runtime_result["termination_reason"] in ("memory_limit", "log_size_limit"):
+    elif runtime_result["termination_reason"] in ("memory_limit", "log_size_limit", "capture_size_limit"):
         verdict, exit_code = "FAIL", 5
-        blocker = f"Bounded run stopped at {runtime_result['termination_reason']}."
+        blocker = f"Bounded run stopped at {runtime_result['termination_reason']} ({runtime_result.get('max_capture_bytes', 0)} captured bytes)."
     elif not frames:
         verdict, exit_code = "FAIL", 7
         blocker = "No screenshot was saved during the bounded runtime."
     else:
         verdict, exit_code = "PARTIAL", 0
-        if gpu["gcn_instruction_translation"] == "NOT_IMPLEMENTED":
+        if gpu["gcn_translation_path"] == "BUILT_OPT_IN_NOT_SELECTED":
             blocker = (
-                "The active Metal path does not translate guest GCN instructions or PS4 vertex-fetch semantics; "
-                "it renders with heuristic MSL substitutes. Correct geometry remains unimplemented."
+                "The active Metal path used heuristic MSL substitutes; the vendored GCN-to-SPIR-V/MSL path "
+                "is opt-in and was not selected. Correct geometry remains unverified."
             )
         elif frame_classifications.get("MALFORMED_POLYGON_CANDIDATE", 0):
             blocker = "Captured frames include a malformed-polygon candidate; vertex fetch/transform, viewport/scissor, and primitive assembly remain unverified."
@@ -834,6 +887,22 @@ def main() -> int:
     print(f"FIRST BLOCKER: {blocker}")
     print(f"REPORT: {run_dir / 'summary.md'}")
     return exit_code
+
+
+def capture_host_resources(path: Path, phase: str) -> None:
+    """Record read-only thermal and memory-pressure data when macOS exposes it."""
+    timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    sections = [f"[{phase}] {timestamp}"]
+    for label, command in (("thermal", ["pmset", "-g", "therm"]),
+                           ("memory_pressure", ["memory_pressure", "-Q"])):
+        try:
+            result = subprocess.run(command, text=True, capture_output=True, timeout=3, check=False)
+            sections.append(f"{label}: exit={result.returncode}")
+            sections.append((result.stdout + result.stderr).strip() or "unavailable")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            sections.append(f"{label}: unavailable ({type(exc).__name__})")
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write("\n".join(sections) + "\n")
 
 
 if __name__ == "__main__":

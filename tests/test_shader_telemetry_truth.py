@@ -17,15 +17,24 @@ class ShaderTelemetryTruthTests(unittest.TestCase):
             "[ps4-gnm-metal] Heuristic MSL substitute compiled (GCN instructions NOT translated): PSO\n",
         )
         self.assertEqual(metrics["heuristic_msl_pipeline_log_entries"], 1)
-        self.assertEqual(metrics["gcn_instruction_translation"], "NOT_IMPLEMENTED")
-        self.assertNotIn("gcn_shader_recompile_log_entries", metrics)
+        self.assertEqual(metrics["gcn_translation_path"], "BUILT_OPT_IN_NOT_SELECTED")
+        self.assertEqual(metrics["gcn_translated_draw_debug_records"], 0)
 
     def test_legacy_recompile_wording_is_not_counted(self):
         metrics = run_iteration.parse_log_metrics(
             "", "[ps4-gnm-metal] GCN shader recompiled: metadata -> PSO\n"
         )
         self.assertEqual(metrics["heuristic_msl_pipeline_log_entries"], 0)
-        self.assertEqual(metrics["gcn_instruction_translation"], "NOT_IMPLEMENTED")
+        self.assertEqual(metrics["gcn_translation_path"], "BUILT_OPT_IN_NOT_SELECTED")
+
+    def test_enabled_msl_path_is_not_mistaken_for_vulkan_backend(self):
+        metrics = run_iteration.parse_log_metrics(
+            "", "[ps4-gnm-metal] GCN translated shader path: enabled (GOW3_GCN=1)\n"
+               "[gcn-debug] draw VS=0x10000 PS=0x20000 vs_id=1 ps_id=2 inputs:\n"
+        )
+        self.assertEqual(metrics["gcn_translation_path"], "MSL_TRANSLATOR_SELECTED")
+        self.assertEqual(metrics["gcn_translated_draw_debug_records"], 1)
+        self.assertEqual(metrics["active_backend"], "not-confirmed")
 
     def test_capture_limit_does_not_mask_first_guest_unsupported_operation(self):
         metrics = run_iteration.parse_log_metrics(

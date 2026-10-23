@@ -12,6 +12,7 @@
 #include "common/types.h"
 
 extern "C" void runtime_thread_attach_host(const char* name);
+extern "C" void runtime_thread_detach_host(void);
 
 namespace Libraries::Kernel {
 class Thread {
@@ -22,6 +23,9 @@ public:
         finished = std::make_shared<std::atomic<bool>>(false);
         thread = std::jthread([func = std::move(func), done = finished](std::stop_token stop) {
             runtime_thread_attach_host("gow3:hle");
+            struct HostThreadDetach {
+                ~HostThreadDetach() { runtime_thread_detach_host(); }
+            } detach;
             func(stop);
             done->store(true);
         });

@@ -73,6 +73,31 @@ typedef struct {
 /* Install exactly once before gow3gpu_init. Invalid or incomplete contracts
  * are rejected before any renderer/window construction begins. */
 int gow3gpu_set_guest_memory_api(const Gow3GpuGuestMemoryApi *api);
+
+/* Versioned bridge to host-owned runtime services. These callbacks are used by
+ * the imported GPU/HLE code instead of importing a second PS4 runtime. errno_address
+ * returns this host thread's C-library errno slot; it is not the guest's PS4 errno
+ * field. The host owns VFS path translation, clocks, thread bookkeeping and restart
+ * policy. */
+#define GOW3GPU_HOST_RUNTIME_ABI_VERSION 1u
+typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    void *user_context;
+    int32_t *(*errno_address)(void *user_context);
+    uint64_t (*process_time_us)(void *user_context);
+    uint64_t (*process_time_counter)(void *user_context);
+    uint64_t (*tsc_frequency)(void *user_context);
+    int (*translate_path)(void *user_context, const char *guest_path,
+                          char *host_path, uint64_t host_path_size);
+    int (*attach_host_thread)(void *user_context, const char *name);
+    void (*detach_host_thread)(void *user_context);
+    void (*request_restart)(void *user_context);
+} Gow3GpuHostRuntimeApi;
+
+/* Install exactly once before gow3gpu_init. Every callback is required. */
+int gow3gpu_set_host_runtime_api(const Gow3GpuHostRuntimeApi *api);
+int gow3gpu_host_runtime_api_is_installed(void);
 /* Registers kernel event queues (needed with or without graphics). */
 void gow3gpu_register_kernel(void);
 /* Creates window, Vulkan device, presenter and GPU command processor. */

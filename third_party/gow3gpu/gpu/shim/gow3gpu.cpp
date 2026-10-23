@@ -459,9 +459,9 @@ static void StartProfileWriter() {
 #endif
 
 extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
-    if (!config || !GuestMemoryApiInstalled()) {
+    if (!config || !GuestMemoryApiInstalled() || !gow3gpu_host_runtime_api_is_installed()) {
         std::fprintf(stderr,
-                     "[gow3gpu] init rejected: valid host guest-memory API must be installed first\n");
+                     "[gow3gpu] init rejected: guest-memory and host-runtime APIs must be installed first\n");
         return -1;
     }
     Gow3Settings::Load();
@@ -534,7 +534,14 @@ extern "C" uintptr_t gow3gpu_resolve(const char* scoped_nid) {
 }
 
 extern "C" int gow3gpu_handle_fault(void* ucontext, void* address) {
-    return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
+    if (runtime_fault_recover) {
+        sigjmp_buf* recover = runtime_fault_recover;
+        runtime_fault_recover = nullptr;
+        siglongjmp(*recover, 1);
+    }
+    if (!ucontext || !address) return 0;
+    auto* signals = Core::Signals::Instance();
+    return signals && signals->DispatchAccessViolation(ucontext, address) ? 1 : 0;
 }
 
 extern "C" unsigned gow3gpu_symbol_count(void) {

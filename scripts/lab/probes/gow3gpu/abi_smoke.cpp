@@ -2,6 +2,9 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+
+#include "host_runtime_test_support.h"
 
 namespace {
 using RegisterKernel = void (*)();
@@ -32,6 +35,10 @@ int main(int argc, char** argv) {
         dlclose(library);
         return 1;
     }
+    if (!Gow3GpuHostRuntimeTest::Install(library)) {
+        std::fprintf(stderr, "host runtime API install failed\n");
+        return 1;
+    }
 
     register_kernel();
     const unsigned count = symbol_count();
@@ -41,6 +48,8 @@ int main(int argc, char** argv) {
     std::printf("{\"abi_load\":true,\"kernel_symbols\":%u,\"create_equeue_resolved\":%s,\"unknown_nid_returns_zero\":%s,\"verdict\":\"%s\"}\n",
                 count, create_equeue ? "true" : "false", missing == 0 ? "true" : "false",
                 passed ? "PASS" : "FAIL");
-    dlclose(library);
-    return passed ? 0 : 1;
+    std::fflush(stdout);
+    // register_kernel starts the imported kernel-service thread; there is no
+    // shutdown API yet, so only this short-lived smoke process exits here.
+    std::_Exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
 }

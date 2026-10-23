@@ -9,6 +9,8 @@
 #include <thread>
 #include <chrono>
 
+#include "host_runtime_test_support.h"
+
 namespace {
 using SetGuestMemoryApi = int (*)(const Gow3GpuGuestMemoryApi*);
 using Init = int (*)(const Gow3GpuConfig*);
@@ -75,6 +77,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "guest-memory API install failed\n");
         return 1;
     }
+    if (!Gow3GpuHostRuntimeTest::Install(library)) {
+        std::fprintf(stderr, "host runtime API install failed\n");
+        return 1;
+    }
 
     const Gow3GpuConfig config{
         .title = "GoW3 Vulkan renderer initialization smoke",
@@ -108,7 +114,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("{\"guest_memory_contract\":\"synthetic_empty\",\"renderer_init_returned\":true,\"gnm_symbols\":%u,\"draw_index_resolved\":true,\"driver_selected_by_loader\":true,\"teardown\":\"process_exit_only\",\"verdict\":\"PASS\"}\n", count);
+    std::printf("{\"guest_memory_contract\":\"synthetic_empty\",\"host_runtime_contract\":\"synthetic_callbacks\",\"renderer_init_returned\":true,\"gnm_symbols\":%u,\"draw_index_resolved\":true,\"driver_selected_by_loader\":true,\"teardown\":\"process_exit_only\",\"verdict\":\"PASS\"}\n", count);
     std::fflush(stdout);
 
     // This candidate API does not export a shutdown function, and its SDL

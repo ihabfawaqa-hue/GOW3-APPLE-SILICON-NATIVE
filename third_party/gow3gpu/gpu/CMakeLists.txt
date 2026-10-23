@@ -16,6 +16,7 @@ add_compile_options(-fno-omit-frame-pointer)
 # profile). Covers gow3gpu and the static libraries linked into it. No -march: the same build
 # runs on the Steam Deck.
 option(GOW3_LTO "Link-time optimization of gow3gpu" ON)
+option(GOW3GPU_TEST_HOOKS "Compile local test-only GPU runtime hooks" OFF)
 set(GOW3_PGO "off" CACHE STRING "Profile-guided optimization: off, generate, use")
 set(GOW3_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pgo" CACHE PATH "Profile directory")
 if (GOW3_LTO)
@@ -152,6 +153,10 @@ set(COMMON
 file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
 file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
+list(FILTER SHIM_SOURCES EXCLUDE REGEX "gow3gpu_runtime_test_hooks\\.cpp$")
+if (GOW3GPU_TEST_HOOKS)
+    list(APPEND SHIM_SOURCES shim/gow3gpu_runtime_test_hooks.cpp)
+endif()
 # Windows: a DLL cannot leave the runtime_* symbols for gow3-probe.exe to resolve, so the
 # library is static there and linked into the executable.
 if (WIN32)

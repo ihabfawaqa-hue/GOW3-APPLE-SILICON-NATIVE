@@ -2,6 +2,7 @@
 #include "ps4_sysmodule.h"
 #include "ps4_vfs.h"
 #include "ps4_log.h"
+#include "ps4_direct_mem.h"
 #include "gow3gpu_runtime_adapter.h"
 
 #include <errno.h>
@@ -411,31 +412,33 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
                              ? (low_mem_limit - (64ULL * 1024 * 1024))
                              : low_mem_limit;
   uint64_t heap_start = (ctx->heap_ptr + 4095ULL) & ~4095ULL;
+  if (heap_start > stack_floor)
+    goto vm_extent_init_failed;
+
+  // Keep static image/TLS/argument mappings in the same locked extent model as
+  // allocated guest memory. This lets checked GPU/runtime accesses observe
+  // mprotect changes instead of treating the whole prefix as implicitly RW.
+  GuestVMExtent *tail = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+  if (!tail)
+    goto vm_extent_init_failed;
+  tail->addr = 0;
+  tail->size = heap_start;
+  tail->is_free = false;
+  tail->is_pinned = true;
+  tail->prot = PROT_READ | PROT_WRITE;
+  strncpy(tail->name, "image", sizeof(tail->name) - 1);
+  ctx->vm_extents = tail;
+
   if (heap_start < stack_floor) {
     GuestVMExtent *root = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+    if (!root)
+      goto vm_extent_init_failed;
     root->addr = heap_start;
     root->size = stack_floor - heap_start;
     root->is_free = true;
-    ctx->vm_extents = root;
-  }
-
-  // Also register the user pool area [0x1000000000 .. guest_mem_sz) as free
-  // extents
-  if (guest_mem_sz > 0x1000000000ULL) {
-    GuestVMExtent *pool_extent =
-        (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
-    pool_extent->addr = 0x1000000000ULL;
-    pool_extent->size = guest_mem_sz - 0x1000000000ULL;
-    pool_extent->is_free = true;
-    GuestVMExtent *tail = ctx->vm_extents;
-    while (tail && tail->next)
-      tail = tail->next;
-    if (tail) {
-      tail->next = pool_extent;
-      pool_extent->prev = tail;
-    } else {
-      ctx->vm_extents = pool_extent;
-    }
+    root->prev = tail;
+    tail->next = root;
+    tail = root;
   }
 
   // Set up guest stack at top of low memory region (growing downwards)
@@ -446,27 +449,51 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
 
   // Register main thread stack extent in VM extents
   GuestVMExtent *stack_extent = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
-  if (stack_extent) {
+  if (!stack_extent)
+    goto vm_extent_init_failed;
+  if (ctx->stack_alloc_size) {
     stack_extent->addr = stack_floor;
     stack_extent->size = low_mem_limit - stack_floor;
     stack_extent->is_free = false;
+    stack_extent->is_pinned = true;
     stack_extent->prot = PROT_READ | PROT_WRITE;
     strncpy(stack_extent->name, "main_stack", sizeof(stack_extent->name) - 1);
-    GuestVMExtent *tail = ctx->vm_extents;
-    while (tail && tail->next)
-      tail = tail->next;
-    if (tail) {
-      tail->next = stack_extent;
-      stack_extent->prev = tail;
-    } else {
-      ctx->vm_extents = stack_extent;
-    }
+    stack_extent->prev = tail;
+    tail->next = stack_extent;
+    tail = stack_extent;
+  } else {
+    free(stack_extent);
+  }
+
+  // User pool memory begins above the system-managed stack region.
+  if (guest_mem_sz > 0x1000000000ULL) {
+    GuestVMExtent *pool_extent =
+        (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+    if (!pool_extent)
+      goto vm_extent_init_failed;
+    pool_extent->addr = 0x1000000000ULL;
+    pool_extent->size = guest_mem_sz - 0x1000000000ULL;
+    pool_extent->is_free = true;
+    pool_extent->prev = tail;
+    tail->next = pool_extent;
   }
 
   ctx->thread_id = 1000;
   recomp_init_main_thread(ctx);
 
   return ctx;
+
+vm_extent_init_failed:
+  fprintf(stderr, "[ps4-recomp] FATAL: unable to initialize guest VM extents\n");
+  while (ctx->vm_extents) {
+    GuestVMExtent *next = ctx->vm_extents->next;
+    free(ctx->vm_extents);
+    ctx->vm_extents = next;
+  }
+  pthread_mutex_destroy(&ctx->vm_mutex);
+  munmap(ctx->mem_base, ctx->mem_size);
+  free(ctx);
+  return NULL;
 }
 
 // Debug aid: PS4_WATCH=<hex guest addr>[:<len>] polls that guest range from a host thread
@@ -1047,12 +1074,11 @@ uint64_t recomp_vm_alloc_named_aligned(GuestContext *ctx, size_t size,
     best->name[0] = '\0';
   }
   uint64_t res = best->addr;
-  size_t res_size = best->size;
   printf("[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x%llx\n",
          (unsigned long long)res);
   fflush(stdout);
   pthread_mutex_unlock(&proc->vm_mutex);
-  ps4_gow3gpu_guest_map(res, res_size);
+  ps4_gow3gpu_guest_map(res, aligned_size);
   return res;
 }
 
@@ -1150,52 +1176,9 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
     curr->name[0] = '\0';
   }
 
-  size_t mapped_size = curr->size;
   pthread_mutex_unlock(&proc->vm_mutex);
-  ps4_gow3gpu_guest_map(aligned_addr, mapped_size);
+  ps4_gow3gpu_guest_map(aligned_addr, aligned_size);
   return aligned_addr;
-}
-
-GuestVMExtent *recomp_vm_find(GuestContext *ctx, uint64_t addr) {
-  if (!ctx)
-    return NULL;
-  GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-  pthread_mutex_lock(&proc->vm_mutex);
-  GuestVMExtent *curr = proc->vm_extents;
-  while (curr) {
-    if (addr >= curr->addr && addr < (curr->addr + curr->size)) {
-      pthread_mutex_unlock(&proc->vm_mutex);
-      return curr;
-    }
-    curr = curr->next;
-  }
-  pthread_mutex_unlock(&proc->vm_mutex);
-  return NULL;
-}
-
-void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size);
-
-// Splits the non-free extent that strictly contains `at` into [addr, at) and [at, end); both
-// halves keep every attribute (name, prot, flags, mtype). Caller holds vm_mutex. Returns false
-// only when memory for the second half is unavailable (nothing is changed then).
-bool recomp_vm_split_extent_at(GuestContext *proc, uint64_t at) {
-  for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
-    if (e->is_free || at <= e->addr || at >= e->addr + e->size)
-      continue;
-    GuestVMExtent *tail = (GuestVMExtent *)calloc(1, sizeof(*tail));
-    if (!tail)
-      return false;
-    *tail = *e;
-    tail->addr = at;
-    tail->size = e->addr + e->size - at;
-    tail->prev = e;
-    e->size = at - e->addr;
-    e->next = tail;
-    if (tail->next)
-      tail->next->prev = tail;
-    return true;
-  }
-  return true; // no extent to split: the boundary already exists (or is in a hole)
 }
 
 // Merges free extents that touch, for the extents overlapping [start, end] plus one neighbour
@@ -1226,11 +1209,13 @@ static void vm_coalesce_free(GuestContext *proc, uint64_t start, uint64_t end) {
 // stay as they were with all their attributes; unmapped parts are skipped. The whole change is
 // made under one vm_mutex hold per phase and no range is ever freed by address twice:
 //  1. (locked) split the extents at both ends, note the mapped ranges inside;
-//  2. (unlocked, the ranges are still allocated so nobody can take them) detach direct-memory
-//     aliases and release the host pages, once per mapped range (ps4_direct_mem_on_unmap takes
-//     the direct-memory lock, which is held while mapping calls into the allocator, so it must
-//     not run under vm_mutex);
-//  3. (locked) mark the ranges free and merge neighbours.
+//  2. Ask the GPU cache to retire each range before taking the mapping lock;
+//  3. take the direct-memory lock, detach aliases, release host pages, and mark
+//     the ranges free under vm_mutex.
+// Guest-memory leases take locks in direct-memory-then-VM order, so they cannot
+// observe a detached physical alias with stale allocated-extent metadata. Do not
+// call the direct-memory path while holding vm_mutex: direct mappings use the
+// same lock order.
 // Returns 0, or -1 for bad arguments or when memory for the bookkeeping is unavailable (the
 // extents are then unchanged apart from harmless splits).
 int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
@@ -1249,7 +1234,7 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
   }
   size_t n = 0;
   for (GuestVMExtent *e = proc->vm_extents; e; e = e->next)
-    if (!e->is_free && e->addr >= start && e->addr + e->size <= end)
+    if (!e->is_free && !e->is_pinned && e->addr >= start && e->addr + e->size <= end)
       n++;
   if (n == 0) {
     pthread_mutex_unlock(&proc->vm_mutex);
@@ -1264,7 +1249,7 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
   }
   size_t k = 0;
   for (GuestVMExtent *e = proc->vm_extents; e && k < n; e = e->next)
-    if (!e->is_free && e->addr >= start && e->addr + e->size <= end) {
+    if (!e->is_free && !e->is_pinned && e->addr >= start && e->addr + e->size <= end) {
       ranges[k].addr = e->addr;
       ranges[k].size = e->size;
       k++;
@@ -1273,7 +1258,11 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
 
   for (size_t i = 0; i < k; i++) {
     ps4_gow3gpu_guest_unmap(ranges[i].addr, ranges[i].size);
-    ps4_direct_mem_on_unmap(proc, ranges[i].addr, ranges[i].size);
+  }
+
+  ps4_direct_mem_guest_access_lock();
+  for (size_t i = 0; i < k; i++) {
+    ps4_direct_mem_on_unmap_locked(proc, ranges[i].addr, ranges[i].size);
     if (proc->mem_base && ranges[i].addr + ranges[i].size <= proc->mem_size) {
 #if defined(__APPLE__) || defined(__linux__)
       madvise(proc->mem_base + ranges[i].addr, ranges[i].size, MADV_DONTNEED);
@@ -1284,10 +1273,11 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
   pthread_mutex_lock(&proc->vm_mutex);
   for (size_t i = 0; i < k; i++)
     for (GuestVMExtent *e = proc->vm_extents; e; e = e->next)
-      if (!e->is_free && e->addr >= ranges[i].addr && e->addr + e->size <= ranges[i].addr + ranges[i].size)
+      if (!e->is_free && !e->is_pinned && e->addr >= ranges[i].addr && e->addr + e->size <= ranges[i].addr + ranges[i].size)
         e->is_free = true;
   vm_coalesce_free(proc, start, end);
   pthread_mutex_unlock(&proc->vm_mutex);
+  ps4_direct_mem_guest_access_unlock();
   free(ranges);
   return 0;
 }

@@ -94,11 +94,18 @@ static int dm_alias(GuestContext *ctx, uint64_t vaddr, uint64_t phys, size_t len
 
 // Called by recomp_vm_free (without vm_mutex held): detach guest [addr, addr+size) from
 // physical memory so the virtual range no longer aliases it.
-void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
+void ps4_direct_mem_guest_access_lock(void) {
+    pthread_mutex_lock(&g_direct_mutex);
+}
+
+void ps4_direct_mem_guest_access_unlock(void) {
+    pthread_mutex_unlock(&g_direct_mutex);
+}
+
+void ps4_direct_mem_on_unmap_locked(GuestContext *ctx, uint64_t addr, size_t size) {
     if (!ctx || size == 0) return;
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
     uint64_t end = addr + size;
-    pthread_mutex_lock(&g_direct_mutex);
     DirectMapping **pp = &g_dmaps;
     while (*pp) {
         DirectMapping *m = *pp;
@@ -134,7 +141,12 @@ void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
             free(m);
         }
     }
-    pthread_mutex_unlock(&g_direct_mutex);
+}
+
+void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
+    ps4_direct_mem_guest_access_lock();
+    ps4_direct_mem_on_unmap_locked(ctx, addr, size);
+    ps4_direct_mem_guest_access_unlock();
 }
 
 // Physical address backing guest address `addr`, if it is mapped direct memory.
@@ -557,21 +569,21 @@ int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisK
         return -EINVAL;
     }
     uint64_t vaddr = (uint64_t)addr;
-    GuestVMExtent *extent = recomp_vm_find(ctx, vaddr);
-    if (!extent) {
+    GuestVMExtent snapshot;
+    if (!recomp_vm_query_extent(ctx, vaddr, &snapshot)) {
         return -EFAULT;
     }
 
     memset(info, 0, infoSize);
-    info->start = (void *)extent->addr;
-    info->end = (void *)(extent->addr + extent->size);
-    info->prot = extent->prot ? extent->prot : (PROT_READ | PROT_WRITE);
-    info->flags = extent->flags;
-    info->isCommitted = extent->is_free ? 0 : 1;
-    info->isFlexibleMemory = (strstr(extent->name, "flexible") != NULL) ? 1 : 0;
-    info->isDirectMemory = (strstr(extent->name, "direct") != NULL) ? 1 : 0;
-    info->isPooledMemory = (strstr(extent->name, "pool") != NULL) ? 1 : 0;
-    strncpy(info->name, extent->name, sizeof(info->name) - 1);
+    info->start = (void *)snapshot.addr;
+    info->end = (void *)(snapshot.addr + snapshot.size);
+    info->prot = snapshot.prot;
+    info->flags = snapshot.flags;
+    info->isCommitted = snapshot.is_free ? 0 : 1;
+    info->isFlexibleMemory = (strstr(snapshot.name, "flexible") != NULL) ? 1 : 0;
+    info->isDirectMemory = (strstr(snapshot.name, "direct") != NULL) ? 1 : 0;
+    info->isPooledMemory = (strstr(snapshot.name, "pool") != NULL) ? 1 : 0;
+    strncpy(info->name, snapshot.name, sizeof(info->name) - 1);
     uint64_t ds, de, dp;
     if (dm_lookup(vaddr, &ds, &de, &dp)) {
         info->start = (void *)ds;
@@ -588,13 +600,13 @@ int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisK
 int sceKernelQueryMemoryProtection(GuestContext *ctx, const void *addr, void **start, void **end, int *prot) {
     if (!ctx) return -EINVAL;
     uint64_t vaddr = (uint64_t)addr;
-    GuestVMExtent *extent = recomp_vm_find(ctx, vaddr);
-    if (!extent) {
+    GuestVMExtent snapshot;
+    if (!recomp_vm_query_extent(ctx, vaddr, &snapshot)) {
         return -EFAULT;
     }
-    if (start) *start = (void *)extent->addr;
-    if (end) *end = (void *)(extent->addr + extent->size);
-    if (prot) *prot = extent->prot ? extent->prot : (PROT_READ | PROT_WRITE);
+    if (start) *start = (void *)snapshot.addr;
+    if (end) *end = (void *)(snapshot.addr + snapshot.size);
+    if (prot) *prot = snapshot.prot;
     return 0;
 }
 

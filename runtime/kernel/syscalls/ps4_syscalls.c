@@ -1217,11 +1217,12 @@ void shim_syscall(GuestContext *ctx) {
     uint64_t addr = ctx->rsi;
     size_t len = (size_t)ctx->rdx;
     int prot = (int)ctx->rcx;
-    GuestVMExtent *ext = recomp_vm_find(ctx, addr);
-    if (ext) {
-      ext->prot = prot;
+    if (recomp_vm_set_protection(ctx, addr, len, prot)) {
+      ctx->rax = 0;
+    } else {
+      set_guest_errno(ctx, EINVAL);
+      ctx->rax = (uint64_t)-1;
     }
-    ctx->rax = 0;
     SHIM_RETURN();
   }
   case 432: // SYS_thr_self

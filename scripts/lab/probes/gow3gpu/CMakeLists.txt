@@ -5,12 +5,14 @@ find_package(Threads REQUIRED)
 add_executable(gow3gpu-runtime-adapter-smoke
     runtime_adapter_smoke.c
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/core/gow3gpu_runtime_adapter.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/core/recomp_guest_memory.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/core/gow3gpu_gnm_adapter.c")
 target_compile_features(gow3gpu-runtime-adapter-smoke PRIVATE c_std_11)
 target_include_directories(gow3gpu-runtime-adapter-smoke PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/core"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/modules/libkernel"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/kernel/vfs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/kernel/memory"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/gow3gpu/gpu")
 target_link_libraries(gow3gpu-runtime-adapter-smoke PRIVATE Threads::Threads)
 

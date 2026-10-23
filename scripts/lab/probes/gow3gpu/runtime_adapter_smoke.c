@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "gow3gpu_runtime_adapter.h"
 #include "gow3gpu_gnm_adapter.h"
+#include "recomp_runtime.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -11,6 +12,16 @@
 
 void ps4_gnm_guest_remapped(uint64_t address, uint64_t size);
 void ps4_gnm_notify_cpu_write(uint64_t address, uint64_t size);
+
+static pthread_mutex_t g_direct_access_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void ps4_direct_mem_guest_access_lock(void) {
+  pthread_mutex_lock(&g_direct_access_mutex);
+}
+
+void ps4_direct_mem_guest_access_unlock(void) {
+  pthread_mutex_unlock(&g_direct_access_mutex);
+}
 
 static Gow3GpuGuestMemoryApi g_memory_api;
 static Gow3GpuHostRuntimeApi g_host_api;
@@ -109,17 +120,23 @@ int main(void) {
   GuestContext ctx = {0};
   ctx.mem_base = memory;
   ctx.mem_size = memory_size;
-  ctx.heap_ptr = 0x12000;
+  ctx.heap_ptr = 0x14000;
   ctx.process_ctx = &ctx;
   pthread_mutex_init(&ctx.vm_mutex, NULL);
-  GuestVMExtent free_heap = {.addr = 0x12000, .size = 0x1e000, .is_free = true};
-  GuestVMExtent allocated = {.addr = 0x30000, .size = 0x2000, .is_free = false};
+  GuestVMExtent image = {.addr = 0, .size = 0x14000, .is_free = false,
+                         .is_pinned = true,
+                         .prot = PROT_READ | PROT_WRITE};
+  GuestVMExtent free_heap = {.addr = 0x14000, .size = 0x1c000, .is_free = true};
+  GuestVMExtent allocated = {.addr = 0x30000, .size = 0x2000, .is_free = false,
+                             .prot = PROT_NONE};
   GuestVMExtent free_tail = {.addr = 0x32000, .size = 0x1e000, .is_free = true};
+  image.next = &free_heap;
+  free_heap.prev = &image;
   free_heap.next = &allocated;
   allocated.prev = &free_heap;
   allocated.next = &free_tail;
   free_tail.prev = &allocated;
-  ctx.vm_extents = &free_heap;
+  ctx.vm_extents = &image;
 
   if (ps4_gow3gpu_install_runtime_apis(&ctx, set_memory_api, set_host_api,
                                        fault_handler) != 0)
@@ -128,14 +145,24 @@ int main(void) {
       g_host_api.abi_version != GOW3GPU_HOST_RUNTIME_ABI_VERSION)
     return fail("ABI version");
 
-  if (!g_memory_api.is_mapped(&ctx, 0x10000, 8) ||
-      g_memory_api.is_mapped(&ctx, 0x11ff8, 16) ||
-      !g_memory_api.is_mapped(&ctx, 0x30000, 0x2000) ||
-      g_memory_api.is_mapped(&ctx, 0x31ff8, 16) ||
-      g_memory_api.is_mapped(&ctx, 0x20000, 8) ||
-      g_memory_api.is_mapped(&ctx, 0, 8) ||
-      g_memory_api.is_mapped(&ctx, memory_size - 4, 8))
+  const int mapping_checks[] = {
+      g_memory_api.is_mapped(&ctx, 0x10000, 8),
+      g_memory_api.is_mapped(&ctx, 0x11ff8, 16),
+      g_memory_api.is_mapped(&ctx, 0x30000, 0x2000),
+      g_memory_api.is_mapped(&ctx, 0x30000, 0),
+      g_memory_api.is_mapped(&ctx, 0x31ff8, 16),
+      g_memory_api.is_mapped(&ctx, 0x20000, 8),
+      g_memory_api.is_mapped(&ctx, 0, 8),
+      g_memory_api.is_mapped(&ctx, memory_size - 4, 8)};
+  if (!mapping_checks[0] || !mapping_checks[1] || !mapping_checks[2] ||
+      !mapping_checks[3] || mapping_checks[4] || mapping_checks[5] ||
+      mapping_checks[6] || mapping_checks[7]) {
+    fprintf(stderr, "mapping checks: %d %d %d %d %d %d %d %d\n",
+            mapping_checks[0], mapping_checks[1], mapping_checks[2],
+            mapping_checks[3], mapping_checks[4], mapping_checks[5],
+            mapping_checks[6], mapping_checks[7]);
     return fail("allocated guest mapping validation");
+  }
   uint64_t guest_address = 0;
   if (!g_memory_api.host_to_guest(&ctx, memory + 0x12345, &guest_address) ||
       guest_address != 0x12345)
@@ -145,9 +172,9 @@ int main(void) {
   if (!g_memory_api.query_region(&ctx, 0x8000, &start, &end, &mapped) ||
       start != 0 || end != 0x10000 || mapped != 0 ||
       !g_memory_api.query_region(&ctx, 0x10000, &start, &end, &mapped) ||
-      start != 0x10000 || end != 0x12000 || mapped != 1 ||
+      start != 0x10000 || end != 0x14000 || mapped != 1 ||
       !g_memory_api.query_region(&ctx, 0x20000, &start, &end, &mapped) ||
-      start != 0x12000 || end != 0x30000 || mapped != 0 ||
+      start != 0x14000 || end != 0x30000 || mapped != 0 ||
       !g_memory_api.query_region(&ctx, 0x30000, &start, &end, &mapped) ||
       start != 0x30000 || end != 0x32000 || mapped != 1)
     return fail("sparse-region boundaries");
@@ -166,6 +193,13 @@ int main(void) {
       copied != value + 3 ||
       g_memory_api.read(&ctx, 0x20000, &copied, sizeof(copied)))
     return fail("guest read");
+  const uint32_t gpu_only_value = 0x1234abcd;
+  memcpy(memory + 0x30000, &gpu_only_value, sizeof(gpu_only_value));
+  uint32_t gpu_only_copy = 0;
+  if (!g_memory_api.read(&ctx, 0x30000, &gpu_only_copy,
+                         sizeof(gpu_only_copy)) ||
+      gpu_only_copy != gpu_only_value)
+    return fail("GPU mapping ignores guest CPU permission bits");
   const uint32_t writeback = 0xdeadbeef;
   if (!g_memory_api.writeback(&ctx, 0x10008, &writeback, sizeof(writeback)) ||
       memcmp(memory + 0x10008, &writeback, sizeof(writeback)) != 0 ||
@@ -174,6 +208,18 @@ int main(void) {
   if (g_memory_api.clamp_range_size(&ctx, memory_size - 16, 128) != 16 ||
       g_memory_api.clamp_range_size(&ctx, 0, 128) != 0)
     return fail("range clamp");
+
+  // A nested callback on the same thread models page-tracking fault handling
+  // re-entering while a checked guest-memory range is leased.
+  RecompGuestMemoryLease outer, inner;
+  if (!recomp_guest_memory_acquire_gpu(&ctx, 0x30000, 8, &outer) ||
+      !recomp_guest_memory_acquire_gpu(&ctx, 0x30008, 8, &inner))
+    return fail("reentrant GPU guest-memory lease");
+  recomp_guest_memory_release(&inner);
+  if (pthread_mutex_trylock(&ctx.vm_mutex) != EBUSY ||
+      pthread_mutex_trylock(&g_direct_access_mutex) != EBUSY)
+    return fail("outer lease lock lifetime");
+  recomp_guest_memory_release(&outer);
 
   /* On this host the callback must accept the OS granularity, including the
    * 16 KiB page size used by Apple Silicon. */
@@ -259,6 +305,6 @@ int main(void) {
 
   pthread_mutex_destroy(&ctx.vm_mutex);
   munmap(memory, memory_size);
-  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
+  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"reentrant_guest_memory_lease\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
   return 0;
 }

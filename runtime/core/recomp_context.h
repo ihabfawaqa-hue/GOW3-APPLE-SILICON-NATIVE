@@ -197,6 +197,7 @@ typedef struct GuestVMExtent {
   uint64_t addr;
   size_t size;
   bool is_free;
+  bool is_pinned;
   int prot;
   int flags;
   int mtype; // memory type set by sceKernelMtypeprotect (0 = write-back onion)

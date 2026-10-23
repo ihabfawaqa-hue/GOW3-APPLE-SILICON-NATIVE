@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "gow3gpu_runtime_adapter.h"
+#include "recomp_runtime.h"
 
 #include "ps4_kernel_sys.h"
+#include "../kernel/memory/ps4_direct_mem.h"
 #include "../kernel/vfs/ps4_vfs.h"
 
 #include <errno.h>
@@ -47,81 +49,26 @@ static GuestContext *process_context(void *user_context) {
   return ctx->process_ctx ? ctx->process_ctx : ctx;
 }
 
-static int valid_guest_range(GuestContext *ctx, uint64_t address, uint64_t size) {
-  ctx = process_context(ctx);
-  if (!ctx || !ctx->mem_base || address < 0x10000ULL || address >= ctx->mem_size)
-    return 0;
-  return size <= (uint64_t)ctx->mem_size - address;
-}
-
 static int guest_query_region(void *user_context, uint64_t address,
                               uint64_t *region_start, uint64_t *region_end,
                               int *mapped) {
   GuestContext *ctx = process_context((GuestContext *)user_context);
-  if (!ctx || !ctx->mem_base || !region_start || !region_end || !mapped ||
-      address >= ctx->mem_size)
-    return 0;
-
-  /* Guest zero page is deliberately sparse. The loaded image and its initial data
-   * occupy the prefix through heap_ptr; later memory follows the VM extent list. */
-  if (address < 0x10000ULL) {
-    *region_start = 0;
-    *region_end = 0x10000ULL;
-    *mapped = 0;
-    return 1;
-  }
-  if (address < ctx->heap_ptr && ctx->heap_ptr <= ctx->mem_size) {
-    *region_start = 0x10000ULL;
-    *region_end = ctx->heap_ptr;
-    *mapped = 1;
-    return 1;
-  }
-
-  pthread_mutex_lock(&ctx->vm_mutex);
-  uint64_t previous_end = ctx->heap_ptr > 0x10000ULL ? ctx->heap_ptr : 0x10000ULL;
-  for (GuestVMExtent *extent = ctx->vm_extents; extent; extent = extent->next) {
-    if (extent->addr >= ctx->mem_size || extent->size == 0) continue;
-    uint64_t extent_end = (uint64_t)extent->size > (uint64_t)ctx->mem_size - extent->addr
-                              ? (uint64_t)ctx->mem_size
-                              : extent->addr + (uint64_t)extent->size;
-    if (extent_end <= previous_end) continue;
-    const uint64_t extent_start = extent->addr > previous_end ? extent->addr : previous_end;
-    if (address < extent_start) {
-      *region_start = previous_end;
-      *region_end = extent_start;
-      *mapped = 0;
-      pthread_mutex_unlock(&ctx->vm_mutex);
-      return 1;
-    }
-    if (address < extent_end) {
-      *region_start = extent_start;
-      *region_end = extent_end;
-      *mapped = !extent->is_free;
-      pthread_mutex_unlock(&ctx->vm_mutex);
-      return 1;
-    }
-    previous_end = extent_end;
-  }
-  *region_start = previous_end;
-  *region_end = ctx->mem_size;
-  *mapped = 0;
-  pthread_mutex_unlock(&ctx->vm_mutex);
-  return 1;
+  return ctx && recomp_guest_memory_query_region(ctx, address, region_start,
+                                                 region_end, mapped);
 }
 
 static int guest_is_mapped(void *user_context, uint64_t address, uint64_t size) {
   GuestContext *ctx = process_context((GuestContext *)user_context);
-  if (!size || !valid_guest_range(ctx, address, size)) return 0;
-  const uint64_t end = address + size;
-  uint64_t cursor = address;
-  while (cursor < end) {
-    uint64_t region_start = 0, region_end = 0;
-    int mapped = 0;
-    if (!guest_query_region(ctx, cursor, &region_start, &region_end, &mapped) ||
-        region_start > cursor || region_end <= cursor || !mapped)
-      return 0;
-    cursor = region_end < end ? region_end : end;
-  }
+  if (!ctx || !ctx->mem_base || address < 0x10000ULL ||
+      address >= ctx->mem_size || size > SIZE_MAX)
+    return 0;
+  // The pinned GPU source uses size=0 for point membership checks.
+  if (!size)
+    size = 1;
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_memory_acquire_gpu(ctx, address, (size_t)size, &lease))
+    return 0;
+  recomp_guest_memory_release(&lease);
   return 1;
 }
 
@@ -132,15 +79,24 @@ static int guest_host_to_guest(void *user_context, const void *host_pointer,
   const uintptr_t base = (uintptr_t)ctx->mem_base;
   const uintptr_t pointer = (uintptr_t)host_pointer;
   if (pointer < base || pointer - base >= ctx->mem_size) return 0;
-  *guest_address = (uint64_t)(pointer - base);
-  return *guest_address >= 0x10000ULL;
+  const uint64_t address = (uint64_t)(pointer - base);
+  if (address < 0x10000ULL || address >= ctx->mem_size) return 0;
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_memory_acquire_gpu(ctx, address, 1, &lease)) return 0;
+  recomp_guest_memory_release(&lease);
+  *guest_address = address;
+  return 1;
 }
 
 static int guest_read(void *user_context, uint64_t address, void *destination,
                       uint64_t size) {
   GuestContext *ctx = process_context(user_context);
-  if (!destination || !guest_is_mapped(ctx, address, size)) return 0;
-  if (size) memcpy(destination, ctx->mem_base + address, (size_t)size);
+  if (!destination || size > SIZE_MAX) return 0;
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_memory_acquire_gpu(ctx, address, (size_t)size, &lease))
+    return 0;
+  memcpy(destination, lease.host_pointer, (size_t)size);
+  recomp_guest_memory_release(&lease);
   return 1;
 }
 
@@ -148,9 +104,11 @@ static int guest_atomic_load(void *user_context, uint64_t address, uint32_t size
                              uint64_t *value) {
   GuestContext *ctx = process_context(user_context);
   if (!value || (size != 1 && size != 4 && size != 8) || address % size ||
-      !guest_is_mapped(ctx, address, size))
+      !ctx)
     return 0;
-  const void *p = ctx->mem_base + address;
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_memory_acquire_gpu(ctx, address, size, &lease)) return 0;
+  const void *p = lease.host_pointer;
   switch (size) {
   case 1:
     *value = __atomic_load_n((const uint8_t *)p, __ATOMIC_ACQUIRE);
@@ -162,6 +120,7 @@ static int guest_atomic_load(void *user_context, uint64_t address, uint32_t size
     *value = __atomic_load_n((const uint64_t *)p, __ATOMIC_ACQUIRE);
     break;
   }
+  recomp_guest_memory_release(&lease);
   return 1;
 }
 
@@ -169,41 +128,53 @@ static int guest_atomic_u64(void *user_context, uint64_t address,
                            uint32_t operation, uint64_t operand,
                            uint64_t *previous_value) {
   GuestContext *ctx = process_context(user_context);
-  if (!previous_value || (address & 7) || !guest_is_mapped(ctx, address, 8))
+  if (!previous_value || (address & 7) || !ctx)
     return 0;
-  uint64_t *p = (uint64_t *)(ctx->mem_base + address);
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_memory_acquire_gpu(ctx, address, sizeof(uint64_t), &lease))
+    return 0;
+  uint64_t *p = (uint64_t *)lease.host_pointer;
+  int success = 1;
   switch (operation) {
   case GOW3GPU_ATOMIC_FETCH_ADD:
     *previous_value = __atomic_fetch_add(p, operand, __ATOMIC_ACQ_REL);
-    return 1;
+    break;
   case GOW3GPU_ATOMIC_FETCH_SUB:
     *previous_value = __atomic_fetch_sub(p, operand, __ATOMIC_ACQ_REL);
-    return 1;
+    break;
   case GOW3GPU_ATOMIC_FETCH_SUB_IF_NONZERO: {
     uint64_t current = __atomic_load_n(p, __ATOMIC_ACQUIRE);
     do {
       if (!current) {
         *previous_value = 0;
-        return 1;
+        break;
       }
     } while (!__atomic_compare_exchange_n(p, &current, current - operand, 1,
                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
-    *previous_value = current;
-    return 1;
+    if (current)
+      *previous_value = current;
+    break;
   }
   case GOW3GPU_ATOMIC_STORE_RELEASE:
     *previous_value = __atomic_exchange_n(p, operand, __ATOMIC_RELEASE);
-    return 1;
+    break;
   default:
-    return 0;
+    success = 0;
+    break;
   }
+  recomp_guest_memory_release(&lease);
+  return success;
 }
 
 static int guest_writeback(void *user_context, uint64_t address,
                            const void *source, uint64_t size) {
   GuestContext *ctx = process_context(user_context);
-  if (!source || !guest_is_mapped(ctx, address, size)) return 0;
-  if (size) memmove(ctx->mem_base + address, source, (size_t)size);
+  if (!source || size > SIZE_MAX) return 0;
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_memory_acquire_gpu(ctx, address, (size_t)size, &lease))
+    return 0;
+  memmove(lease.host_pointer, source, (size_t)size);
+  recomp_guest_memory_release(&lease);
   return 1;
 }
 
@@ -220,7 +191,10 @@ static int guest_gpu_protect(void *user_context, uint64_t address, uint64_t size
                              int read, int write) {
   GuestContext *ctx = process_context(user_context);
   if (size == 0) return 1;
-  if ((write && !read) || !guest_is_mapped(ctx, address, size)) return 0;
+  if (!ctx || !ctx->mem_base || (write && !read) || size > SIZE_MAX ||
+      address < 0x10000ULL || address >= ctx->mem_size ||
+      size > (uint64_t)ctx->mem_size - address)
+    return 0;
   const long page_size_signed = sysconf(_SC_PAGESIZE);
   if (page_size_signed <= 0) return 0;
   const uint64_t page_size = (uint64_t)page_size_signed;
@@ -231,7 +205,14 @@ static int guest_gpu_protect(void *user_context, uint64_t address, uint64_t size
   const uint64_t end = (end_unaligned + page_size - 1) & ~(page_size - 1);
   if (start < 0x10000ULL || end > ctx->mem_size || end <= start) return 0;
   const int protection = read ? (PROT_READ | (write ? PROT_WRITE : 0)) : PROT_NONE;
-  return mprotect(ctx->mem_base + start, (size_t)(end - start), protection) == 0;
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_memory_acquire_gpu(ctx, start, (size_t)(end - start),
+                                       &lease))
+    return 0;
+  const int result = mprotect(lease.host_pointer, (size_t)(end - start),
+                              protection);
+  recomp_guest_memory_release(&lease);
+  return result == 0;
 }
 
 static int install_gpu_hooks(void *user_context, Gow3GpuGuestRangeHook map,
@@ -249,26 +230,33 @@ static int install_gpu_hooks(void *user_context, Gow3GpuGuestRangeHook map,
   }
   g_gow3gpu_hooks = (Gow3GpuMapHookState){map, unmap, invalidate, hook_context, 1};
   GuestContext *ctx = process_context(user_context);
-  size_t range_count = 1;
+  size_t range_count = 0;
+  ps4_direct_mem_guest_access_lock();
   pthread_mutex_lock(&ctx->vm_mutex);
   for (GuestVMExtent *e = ctx->vm_extents; e; e = e->next)
-    if (!e->is_free) range_count++;
+    if (!e->is_free && e->size && e->addr < ctx->mem_size &&
+        e->size <= ctx->mem_size - e->addr &&
+        e->addr + e->size > 0x10000ULL)
+      range_count++;
   Gow3GpuMapRange *ranges = (Gow3GpuMapRange *)calloc(range_count, sizeof(*ranges));
-  if (!ranges) {
+  if (range_count && !ranges) {
     pthread_mutex_unlock(&ctx->vm_mutex);
+    ps4_direct_mem_guest_access_unlock();
     memset(&g_gow3gpu_hooks, 0, sizeof(g_gow3gpu_hooks));
     pthread_mutex_unlock(&g_gow3gpu_hook_mutex);
     return 0;
   }
   size_t count = 0;
-  if (ctx->heap_ptr > 0x10000ULL)
-    ranges[count++] = (Gow3GpuMapRange){0x10000ULL, ctx->heap_ptr - 0x10000ULL};
   for (GuestVMExtent *e = ctx->vm_extents; e; e = e->next) {
     if (!e->is_free && e->size && e->addr < ctx->mem_size &&
-        e->size <= ctx->mem_size - e->addr)
-      ranges[count++] = (Gow3GpuMapRange){e->addr, e->size};
+        e->size <= ctx->mem_size - e->addr &&
+        e->addr + e->size > 0x10000ULL) {
+      const uint64_t start = e->addr < 0x10000ULL ? 0x10000ULL : e->addr;
+      ranges[count++] = (Gow3GpuMapRange){start, e->addr + e->size - start};
+    }
   }
   pthread_mutex_unlock(&ctx->vm_mutex);
+  ps4_direct_mem_guest_access_unlock();
   const Gow3GpuMapHookState hooks = g_gow3gpu_hooks;
   pthread_mutex_unlock(&g_gow3gpu_hook_mutex);
   for (size_t i = 0; i < count; ++i)

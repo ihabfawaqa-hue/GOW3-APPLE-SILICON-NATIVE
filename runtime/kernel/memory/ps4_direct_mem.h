@@ -54,6 +54,11 @@ typedef struct OrbisDirectMemoryQueryInfo {
 
 int ps4_direct_mem_init(void);
 void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size);
+// Guest-memory leases take these before vm_mutex. Direct map/unmap paths use the
+// same direct-memory-then-VM lock order so aliases cannot change during a lease.
+void ps4_direct_mem_guest_access_lock(void);
+void ps4_direct_mem_guest_access_unlock(void);
+void ps4_direct_mem_on_unmap_locked(GuestContext *ctx, uint64_t addr, size_t size);
 void ps4_direct_mem_destroy(void);
 
 // Direct Memory

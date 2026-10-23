@@ -1,6 +1,6 @@
 # Upstream GPU import manifest
 
-Updated: 2026-10-23. The current isolated import is `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `luna/gow3-runtime-integration`, commit `a0a7a9d`. The production `ps4_app` still does not load or link this candidate GPU; it continues to use the custom Metal path.
+Updated: 2026-10-24. The current isolated import is `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `luna/gow3-runtime-integration`, commit `fe69130` (synthetic submit/queue-retirement fix `a0a7a9d`). The production `ps4_app` still does not load or link this candidate GPU; it continues to use the custom Metal path.
 
 ## Source and provenance
 
@@ -41,7 +41,7 @@ The local platform changes are committed in the isolated branch and itemized in 
 | Candidate GPU teardown | NOT TESTED: the candidate C ABI still lacks coordinated renderer, kernel-service, SDL/window, and main-queue timer shutdown |
 | Production integration | NOT TESTED: no real game GNM import, guest submission, game memory, EOP/equeue event, or integrated VideoOut reaches this library |
 
-The candidate-specific NOP smoke first failed because submit-done returned before draw-pipe/deferred-signal retirement. The isolated fix makes `gow3gpu_wait_idle` wait for `work_retired`, and the bounded rerun passes. This diagnostic wait is not a substitute for the guest's EOP/equeue completion contract.
+The candidate-specific NOP smoke first failed because submit-done returned before draw-pipe/deferred-signal retirement. The isolated fix makes `gow3gpu_wait_idle` wait for `work_retired`, and the bounded rerun passes. This diagnostic wait is not a substitute for the guest's EOP/equeue completion contract. The separate active Metal path was subsequently fixed to wait for its submitted Metal command buffer before publishing labels and events. A 25-second PS4 Pro game smoke sampled completion through total 6,240 with no rejection logs. That result validates only the legacy comparison path and does not satisfy the candidate's completion contract.
 
 ## Vulkan evidence on Apple M2
 
@@ -55,6 +55,6 @@ MoltenVK 1.4.2 passes diagnostic presentation and readback cases but fails stric
 
 The primary call graph still routes `shim_sceGnmSubmitCommandBuffers(GuestContext*)` to `ps4_gnm_metal_process_command_buffers`; `ps4_gnm_metal_present` owns presentation. The placeholder `gpu/gow3gpu_bridge.cpp` forwards back to Metal and is not the imported backend. The candidate `gow3gpu_resolve(const char *scoped_nid)` returns PS4_SYSV HLE function addresses, so it cannot be cast to the primary runtime's `GuestContext*` shim. The submit-specific adapter has been exercised synthetically, but no application call site invokes it.
 
-The latest bounded production run is `run_20261023_202535_550108`; it reports `native-metal`. The Sony and Santa Monica cards are correct in captured samples, followed by a blank sample, a severely stretched Kratos face texture, and persistent white/black/white bands. Screenshots, copied logs, and draw traces are under `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-202535/`. The frame trace does not contain the matching per-draw texture/resource snapshots needed to attribute the corruption.
+The latest bounded production run is `run_20261023_203917_961646`; it reports `native-metal`. The Sony card at sample 120 and Santa Monica card through 1440 are visually correct. White samples appear at 1470–1560, corrupted grayscale output appears at 1590, a stretched brown texture at 1620, a white frame at 1650, and a repeated black/white split from 1680 through 5610. Screenshots, copied logs, and selected draw traces are under `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-203917/`. The frame trace does not contain the matching per-draw texture/resource snapshots needed to attribute the corruption. The optional custom Metal GCN translation path remains disabled in the production run.
 
 Do not promote the candidate until the runtime installs its memory and host-service contracts, routes typed GNM imports, establishes one GPU completion/event owner and one VideoOut presenter, and passes a real bounded guest workload with safe teardown.

@@ -45,7 +45,38 @@ uint64_t recomp_vm_alloc_named_aligned(GuestContext *ctx, size_t size, size_t al
 uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr, size_t size, int prot, int flags, const char *name);
 int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size);
 bool recomp_vm_split_extent_at(GuestContext *proc, uint64_t at);
-GuestVMExtent *recomp_vm_find(GuestContext *ctx, uint64_t addr);
+
+// A guest-memory lease holds the direct-memory and VM extent locks until release.
+// The returned host pointer is valid only while the lease remains held. Locks are
+// acquired in direct-memory-then-VM order, matching alias map/unmap operations.
+typedef struct RecompGuestMemoryLease {
+  GuestContext *process;
+  void *host_pointer;
+  uint64_t guest_addr;
+  size_t size;
+  bool held;
+} RecompGuestMemoryLease;
+
+bool recomp_guest_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
+                                 size_t size, int access,
+                                 RecompGuestMemoryLease *lease);
+// GPU accesses use the same lifetime locks but are checked against mapped
+// extents rather than the guest CPU's read/write permission bits.
+bool recomp_guest_memory_acquire_gpu(GuestContext *ctx, uint64_t guest_addr,
+                                     size_t size,
+                                     RecompGuestMemoryLease *lease);
+void recomp_guest_memory_release(RecompGuestMemoryLease *lease);
+bool recomp_guest_memory_read(GuestContext *ctx, uint64_t guest_addr,
+                              void *destination, size_t size);
+bool recomp_guest_memory_write(GuestContext *ctx, uint64_t guest_addr,
+                               const void *source, size_t size);
+bool recomp_vm_query_extent(GuestContext *ctx, uint64_t addr,
+                            GuestVMExtent *snapshot);
+bool recomp_guest_memory_query_region(GuestContext *ctx, uint64_t addr,
+                                     uint64_t *region_start,
+                                     uint64_t *region_end, int *mapped);
+bool recomp_vm_set_protection(GuestContext *ctx, uint64_t addr, size_t size,
+                              int prot);
 
 typedef struct RecompUnresolvedSym {
     uint64_t addr;

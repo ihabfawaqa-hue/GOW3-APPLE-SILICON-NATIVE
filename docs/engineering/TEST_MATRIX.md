@@ -15,10 +15,10 @@ Updated: 2026-10-23. Status is evidence-based. Synthetic and standalone tests ar
 | M2 | Effective depth/stencil regression | **PASS** | `tests/test_depth_stencil_state.cpp` native arm64. |
 | M2 | Scaled MIN/MAX blend regression | **PASS** | `tests/test_blend_rewrite.cpp` native arm64. |
 | M2 | Candidate ABI and host runtime smoke | **PASS** | Candidate exports and resolver checked; runtime callbacks cover errno, time, VFS, thread attach/detach, restart and recoverable fault. |
-| M2 | Candidate Cocoa/Vulkan renderer initialization | **PASS, limited** | KosmicKrisp selects Apple M2, creates presenter and registers 327 GNM symbols. No guest command submitted; teardown not tested. |
+| M2 | Candidate Cocoa/Vulkan renderer and raw GNM API | **PASS, limited** | KosmicKrisp selects Apple M2, creates presenter and registers 327 GNM symbols. The standalone smoke resolves `sceGnmSubmitCommandBuffers` and `sceGnmSubmitDone` by NID, submits an 8-byte PM4 NOP, then waits on diagnostic queue-drain; both calls and drain return 0. Run artifact: `/Users/ihabfawaqa/Library/Application Support/GOW3Lab/runs/gow3gpu_pm4_drain_20261023_200046_m2_kosmickrisp/`. It does not call the primary GuestContext shim; teardown remains untested. |
 | M3 | KosmicKrisp source-derived feature/workload probe | **PASS, bounded** | Instance/device, required features, presentation, storage-image compute/readback, offscreen barriers and image alias/view reinterpretation pass. D16S8/D24S8 unavailable; guest depth semantics remain open. |
 | M3 | MoltenVK strict device creation | **FAIL** | Missing `robustBufferAccess2` and `nullDescriptor`. Its diagnostic workloads do not make it renderer-compatible. |
-| M4 | Live GNM submission to candidate | **NOT TESTED** | Primary app still calls custom Metal; typed import bridge is not implemented. |
+| M4 | Live GNM submission to candidate | **NOT TESTED** | Primary app still calls custom Metal; the direct raw-HLE NOP smoke does not exercise a GuestContext import or game submission. Typed import bridge is not implemented. |
 | M5 | Guest-memory adapter contract | **PASS, synthetic only** | Checks static/allocated/free ranges, sparse holes, reads/writeback, acquire atomics, map/unmap/invalidate callbacks, host page protection and M2 16 KiB tracker granularity. Not installed in a game process. |
 | M5 | Live GPU page fault, EOP, event and guest wakeup | **NOT TESTED** | No candidate command has executed in the app. |
 | M6 | Real shader and texture validation | **NOT TESTED** | No candidate guest shader/resource capture. |

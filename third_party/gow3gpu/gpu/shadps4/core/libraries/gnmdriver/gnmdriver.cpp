@@ -2387,6 +2387,17 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     return ORBIS_OK;
 }
 
+// gow3: bounded integration probes need to distinguish an accepted submit from
+// work that the Liverpool thread has actually retired. This is diagnostic only;
+// guest synchronization continues through the guest's EOP/equeue contract.
+extern "C" int gow3gpu_wait_idle() {
+    if (!liverpool) {
+        return -1;
+    }
+    liverpool->WaitGpuIdle();
+    return 0;
+}
+
 int PS4_SYSV_ABI sceGnmUnmapComputeQueue(u32 vqid) {
     liverpool->asc_queues.erase(Common::SlotId{vqid - 1});
     return ORBIS_OK;

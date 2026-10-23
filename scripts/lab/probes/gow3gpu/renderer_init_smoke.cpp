@@ -8,6 +8,7 @@
 #include <limits>
 #include <thread>
 #include <chrono>
+#include <array>
 
 #include "host_runtime_test_support.h"
 
@@ -17,6 +18,10 @@ using Init = int (*)(const Gow3GpuConfig*);
 using RegisterKernel = void (*)();
 using Resolve = uintptr_t (*)(const char*);
 using SymbolCount = unsigned (*)();
+using SubmitCommandBuffers = int32_t (*)(uint32_t, const uint32_t* const*, uint32_t*,
+                                         const uint32_t* const*, uint32_t*);
+using SubmitDone = int32_t (*)();
+using WaitIdle = int (*)(void);
 
 template <typename T>
 T Load(void* library, const char* name) {
@@ -53,7 +58,8 @@ int main(int argc, char** argv) {
     const auto register_kernel = Load<RegisterKernel>(library, "gow3gpu_register_kernel");
     const auto resolve = Load<Resolve>(library, "gow3gpu_resolve");
     const auto symbol_count = Load<SymbolCount>(library, "gow3gpu_symbol_count");
-    if (!set_memory_api || !init || !register_kernel || !resolve || !symbol_count) {
+    const auto wait_idle = Load<WaitIdle>(library, "gow3gpu_wait_idle");
+    if (!set_memory_api || !init || !register_kernel || !resolve || !symbol_count || !wait_idle) {
         std::fprintf(stderr, "required GoW3 GPU C ABI export missing\n");
         return 1;
     }
@@ -109,12 +115,39 @@ int main(int argc, char** argv) {
     register_kernel();
     const unsigned count = symbol_count();
     const uintptr_t draw_index = resolve("HlTPoZ-oY7Y#libSceGnmDriver#libSceGnmDriver");
-    if (count == 0 || draw_index == 0) {
+    const uintptr_t submit_address = resolve("zwY0YV91TTI#libSceGnmDriver#libSceGnmDriver");
+    const uintptr_t submit_done_address = resolve("yvZ73uQUqrk#libSceGnmDriver#libSceGnmDriver");
+    if (count == 0 || draw_index == 0 || submit_address == 0 || submit_done_address == 0) {
         std::fprintf(stderr, "renderer initialized but GNM registration was incomplete\n");
         return 1;
     }
 
-    std::printf("{\"guest_memory_contract\":\"synthetic_empty\",\"host_runtime_contract\":\"synthetic_callbacks\",\"renderer_init_returned\":true,\"gnm_symbols\":%u,\"draw_index_resolved\":true,\"driver_selected_by_loader\":true,\"teardown\":\"process_exit_only\",\"verdict\":\"PASS\"}\n", count);
+    // This standalone probe verifies the real exported GNM HLE ABI and command
+    // processor with a valid two-DWORD PM4 NOP packet. Keep the buffer alive
+    // until submit-done has observed queue completion. It is a protocol smoke,
+    // not a game workload and does not cross the GuestContext import shim.
+    static std::array<uint32_t, 2> dcb{0xc0001000u, 0u};
+    const uint32_t* dcb_addresses[] = {dcb.data()};
+    uint32_t dcb_sizes[] = {static_cast<uint32_t>(dcb.size() * sizeof(uint32_t))};
+    const auto submit = reinterpret_cast<SubmitCommandBuffers>(submit_address);
+    const auto submit_done = reinterpret_cast<SubmitDone>(submit_done_address);
+    const int32_t submit_result = submit(1, dcb_addresses, dcb_sizes, nullptr, nullptr);
+    if (submit_result != 0) {
+        std::fprintf(stderr, "candidate sceGnmSubmitCommandBuffers returned %d\n", submit_result);
+        return 1;
+    }
+    const int32_t submit_done_result = submit_done();
+    if (submit_done_result != 0) {
+        std::fprintf(stderr, "candidate sceGnmSubmitDone returned %d\n", submit_done_result);
+        return 1;
+    }
+    const int wait_idle_result = wait_idle();
+    if (wait_idle_result != 0) {
+        std::fprintf(stderr, "candidate queue drain returned %d\n", wait_idle_result);
+        return 1;
+    }
+
+    std::printf("{\"guest_memory_contract\":\"synthetic_empty\",\"host_runtime_contract\":\"synthetic_callbacks\",\"renderer_init_returned\":true,\"gnm_symbols\":%u,\"draw_index_resolved\":true,\"synthetic_pm4_nop_submitted\":true,\"submit_result\":%d,\"submit_done_result\":%d,\"candidate_queue_drained\":true,\"guest_context_import_path\":false,\"driver_selected_by_loader\":true,\"teardown\":\"process_exit_only\",\"verdict\":\"PASS\"}\n", count, submit_result, submit_done_result);
     std::fflush(stdout);
 
     // This candidate API does not export a shutdown function, and its SDL

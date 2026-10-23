@@ -8,8 +8,8 @@ Updated: 2026-10-23. Status is evidence-based. Synthetic and standalone tests ar
 | M0 | Two generator runs | **PASS** | `tools/generate_build_ninja.py` run twice; byte hashes match. |
 | M0 | Clean isolated app build | **PASS** | `ninja -j4 ps4_app` completed 315 actions; output is Mach-O arm64. Generated local inputs came from read-only symlinks; no game assets entered Git. |
 | M0 | Incremental compilation | **PASS** | A temporary edit and restore of `runtime/core/ps4_sfo.c` each rebuilt that one object and relinked only `ps4_app`; log is in the local GOW3Lab memory-adapter run folder. |
-| M1 | Internal splash/transition capture | **PARTIAL** | Primary run `run_20261023_200416_580660` confirms Sony at sample 120 and Santa Monica at 780, then white at 930, visibly corrupted gray/black at 960, and half-black at 1200. All frames and runtime logs were copied to `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-200416/`. |
-| M1 | Bounded app smoke | **PASS, bounded** | `python3 scripts/lab/iterate.py --mode smoke --runtime-seconds 60 --screenshot-every 30`; deadline termination, no crash; 116 internal frames, 58 logged presents, and partial GPU snapshots. |
+| M1 | Internal splash/transition capture | **PARTIAL** | Primary run `run_20261023_202535_550108` confirms Sony at 120 and Santa Monica through 1410, black at 1440, a stretched Kratos face texture at 1590, and white/black/white bands from 1650 through 5610. Full frames, selected screenshots, runtime logs, and bounded draw traces were copied to `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-202535/`. The draw trace lacks matching texture/resource snapshots. |
+| M1 | Bounded app smoke | **PASS, bounded** | `python3 scripts/lab/iterate.py --mode smoke --runtime-seconds 60 --screenshot-every 30 --max-capture-mb 512 --max-log-mb 32 --max-rss-mb 8192`; deadline termination after 60.872 seconds, no crash; 188 internal frames, 95 presents, and 128 partial GPU snapshots. |
 | M2 | Pinned GoW3 GPU full native build | **PASS** | Candidate CMake `gow3gpu` shared library compiles/links for arm64. |
 | M2 | GoW3 aliasing regression | **PASS** | `tests/test_aliasing.cpp` native arm64. |
 | M2 | Effective depth/stencil regression | **PASS** | `tests/test_depth_stencil_state.cpp` native arm64. |
@@ -26,7 +26,7 @@ Updated: 2026-10-23. Status is evidence-based. Synthetic and standalone tests ar
 | M6 | Real shader and texture validation | **NOT TESTED** | No candidate guest shader/resource capture. |
 | M7 | Deterministic replay | **NOT TESTED** | No complete PM4/state/memory capture. |
 | M8–M9 | Geometry, texture sampling, multipass composition | **NOT TESTED** | Need a replayable candidate workload. |
-| M10 | Recognizable post-splash image | **FAIL** | Latest production screenshot sequence becomes white and half-black. |
+| M10 | Recognizable post-splash image | **FAIL** | Latest production screenshot sequence becomes black, then a severely stretched face texture and persistent white/black/white bands; no correct game scene is verified. |
 | M11–M14 | Audio/video, menu/gameplay, sustained performance | **NOT TESTED** | Follow graphics and presentation integration. |
 
-Latest game evidence: `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-200416/`. Candidate synthetic/renderer tests: `~/Library/Application Support/GOW3Lab/runs/gow3gpu_memory_adapter_20261023_m2/` and `/tmp/gow3_gpu_runtime_smoke_strict/gow3gpu-runtime-adapter-smoke`.
+Latest game evidence: `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-202535/`. Candidate synthetic/renderer tests: `~/Library/Application Support/GOW3Lab/runs/gow3gpu_memory_adapter_20261023_m2/` and `/tmp/gow3_gpu_runtime_smoke_strict/gow3gpu-runtime-adapter-smoke`.

@@ -1,74 +1,60 @@
 # Upstream GPU import manifest
 
-Updated: 2026-10-23. This manifest records the source snapshot imported into the isolated integration worktree. It does **not** claim the full GPU library is linked into the application.
+Updated: 2026-10-23. The current isolated import is `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `luna/gow3-runtime-integration`, commit `a0a7a9d`. The production `ps4_app` still does not load or link this candidate GPU; it continues to use the custom Metal path.
 
-## Candidate source
+## Source and provenance
 
-| Field | Value |
+| Item | Value |
 |---|---|
-| Repository | [Sohebdsa/gow3_pc](https://github.com/Sohebdsa/gow3_pc) |
-| Branch inspected | `gow3` |
-| Repository commit | `b907d8a9f2324ba5f514fbfe7de803e027c6ca26` |
-| Imported path audited | `gpu/` and root `tests/` |
-| Vendored shadPS4 base recorded by upstream | `b4e7ae776071ceb1dd35004577a8719481e1d258` |
-| License | GPL-2.0-or-later for the GPU source; retain per-file SPDX and third-party license files |
-| Upstream build configuration | CMake, C++23, position-independent code, shared `gow3gpu`; requires Vulkan, fmt, Boost, tsl-robin-map, VMA, xxhash, SDL3, X11 on all non-Windows platforms, Zydis, glslang, and included sirit/FSR Vulkan/miniz components |
-| Tested target architecture | Three pure CPU regression tests compiled and run as macOS arm64; full Vulkan GPU target has not compiled |
-| Local import status | Exact snapshot in `third_party/gow3gpu/` on `luna/gow3gpu-integration`; not linked into `ps4_app`. Current `gpu/gow3gpu_bridge.cpp` remains a placeholder. |
+| Upstream repository | `https://github.com/Sohebdsa/gow3_pc` |
+| Inspected branch / revision | `gow3` / `b907d8a9f2324ba5f514fbfe7de803e027c6ca26` |
+| Imported source | Candidate `gpu/`, `src/`, tests, licenses, and exact Git submodules under `third_party/gow3gpu/` |
+| Vendored shadPS4 base | `b4e7ae776071ceb1dd35004577a8719481e1d258`, per upstream `gpu/VENDOR.txt` |
+| License | GPL-2.0-or-later GPU source; per-file SPDX notices and bundled dependency licenses are retained |
+| Upstream build | CMake, C++23 shared library; dependencies and revisions are recorded in `third_party/gow3gpu/IMPORT_MANIFEST.md` |
+| Tested target | macOS 27.0, Apple M2, native arm64 |
 
-The full candidate `gpu/` is a substantial emulator subsystem: Vulkan Liverpool command processing, video core, shader recompiler, guest-facing shims, and associated libraries. An unmodified copy, plus the relative `src/` and `tests/` trees required by CMake, is isolated under `third_party/gow3gpu/`. It is not interchangeable with the local `gpu/shadps4-recompiler/` subset; the two source histories remain separate.
+`gpu/VENDOR.txt` records shader-recompiler backports `233562929`, `d96278e1e`, `e518a6515`, `282e5c792`, `fb6367d29`, `94e217781`, `d1cb90dbb`, `dd43d1cac`, and `ef08b1e1f`. The manifest preserves the upstream abbreviated identifiers; it does not claim to have expanded or independently verified each commit hash. Do not substitute arbitrary current shadPS4 files.
 
-## GoW3 corrections verified at the candidate commit
+## GoW3-specific corrections
 
-All three commits below are ancestors of `b907d8a9f2324ba5f514fbfe7de803e027c6ca26`; their source and corresponding tests were inspected. Each regression test passed when compiled with the native Apple clang toolchain as an arm64 executable.
+All three requested commits are present in the selected source revision. Their CPU-side regression programs were rebuilt and passed as native arm64 executables:
 
-| Commit | Correction | Regression test | Result |
-|---|---|---|---|
-| `4676e1c47171f1b1f255d70de3a5f8f07479770f` | Effective depth/stencil attachment state; omit attachments that cannot affect the draw | `tests/test_depth_stencil_state.cpp` | PASS |
-| `036d5d7d78f5fef7b88ffa69b4f07bee108f697f` | Synchronize compatible image interpretations that alias the same guest memory | `tests/test_aliasing.cpp` | PASS |
-| `9c88add1e69657c87f215628573633a0529fa9a9` | Rewrite scaled MIN/MAX blend behavior, including the GoW3 supplemental squared pass | `tests/test_blend_rewrite.cpp` | PASS |
+| Commit | Correction | Regression |
+|---|---|---|
+| `036d5d7d78f5fef7b88ffa69b4f07bee108f697f` | Synchronize compatible image views backed by aliased guest memory | `test_aliasing.cpp`: PASS |
+| `4676e1c47171f1b1f255d70de3a5f8f07479770f` | Use effective depth/stencil attachment state, including fullscreen/post-processing draws | `test_depth_stencil_state.cpp`: PASS |
+| `9c88add1e69657c87f215628573633a0529fa9a9` | Preserve scaled MIN/MAX blending behavior, including the GoW3 supplemental draw | `test_blend_rewrite.cpp`: PASS |
 
-Test outputs and commands are recorded in `TEST_MATRIX.md`. These CPU-side rules tests do not test Vulkan image copying, pipeline execution, or rendered game output.
+These CPU-side tests do not validate actual Vulkan image memory, guest command processing, or game output.
 
-The reproducible native commands (run from the upstream checkout root) were:
+## Local Apple Silicon port and build evidence
 
-```sh
-clang++ -std=c++23 -O0 -UNDEBUG -I gpu/shim -I gpu/shadps4 -I gpu/third_party/gcn/include -I /opt/homebrew/include \
-  tests/test_aliasing.cpp gpu/shadps4/video_core/texture_cache/aliasing.cpp \
-  gpu/shadps4/video_core/texture_cache/host_compatibility.cpp \
-  -L/opt/homebrew/lib -lfmt -o /tmp/gow3_gpu_tests/aliasing-test
-/tmp/gow3_gpu_tests/aliasing-test
+The local platform changes are committed in the isolated branch and itemized in `third_party/gow3gpu/IMPORT_MANIFEST.md`. They cover macOS CMake/windowing and Vulkan portability setup, ARM64 timing/thread helpers, Mach-O symbols, page tracking at the M2's 16 KiB granularity, versioned guest-memory and host-runtime callbacks, and PM4 buffer lifetime through Liverpool `work_retired`. The source ownership, patches, dependencies, licenses, and test commands are recorded there.
 
-clang++ -std=c++23 -O0 -UNDEBUG -I gpu/shim -I gpu/shadps4 -I gpu/third_party/gcn/include -I /opt/homebrew/include \
-  tests/test_blend_rewrite.cpp -L/opt/homebrew/lib -lfmt \
-  -o /tmp/gow3_gpu_tests/blend-rewrite-test
-/tmp/gow3_gpu_tests/blend-rewrite-test
+| Check | Result |
+|---|---|
+| Full candidate GPU CMake target | PASS: `libgow3gpu.dylib` builds as Mach-O arm64 at `/tmp/gow3gpu-runtime-int-build/libgow3gpu.dylib` |
+| Guest-memory contract and host-service callbacks | PASS, synthetic: versioned callbacks and host runtime tests pass; `nm -u` shows no unresolved project `runtime_*` callback imports |
+| GNM `GuestContext` submit adapter | PASS, synthetic: validates guest argument arrays, copies bounded DCB/CCB bytes, retains them through submit-done and full retirement, rejects an unmapped array |
+| Candidate renderer and queue smoke | PASS, limited: KosmicKrisp initializes the candidate; a synthetic `GuestContext` PM4 NOP reaches the real candidate HLE and Liverpool queue, which reports `work_retired` before buffer release |
+| Candidate GPU teardown | NOT TESTED: the candidate C ABI still lacks coordinated renderer, kernel-service, SDL/window, and main-queue timer shutdown |
+| Production integration | NOT TESTED: no real game GNM import, guest submission, game memory, EOP/equeue event, or integrated VideoOut reaches this library |
 
-clang++ -std=c++23 -O0 -UNDEBUG -I gpu/shim -I gpu/shadps4 -I gpu/third_party/gcn/include -I /opt/homebrew/include \
-  tests/test_depth_stencil_state.cpp -L/opt/homebrew/lib -lfmt \
-  -o /tmp/gow3_gpu_tests/depth-stencil-state-test
-/tmp/gow3_gpu_tests/depth-stencil-state-test
-```
+The candidate-specific NOP smoke first failed because submit-done returned before draw-pipe/deferred-signal retirement. The isolated fix makes `gow3gpu_wait_idle` wait for `work_retired`, and the bounded rerun passes. This diagnostic wait is not a substitute for the guest's EOP/equeue completion contract.
 
-## Other upstream shader-recompiler backports
+## Vulkan evidence on Apple M2
 
-The candidate's `gpu/VENDOR.txt` additionally records these shadPS4 shader-recompiler backports after the base commit: `233562929`, `d96278e1e`, `e518a6515`, `282e5c792`, `fb6367d29`, `94e217781`, `d1cb90dbb`, `dd43d1cac`, and `ef08b1e1f`. Preserve the upstream manifest as source evidence; before import, expand each abbreviation to a full commit hash and verify its patch is present in the selected source.
+KosmicKrisp, built from Mesa revision `09a9fae26d5df276a23b3f66050cd0d1d227800a`, passes the tested source-derived feature/device creation gate, swapchain presentation, storage-image compute/readback, offscreen barriers/readback, image-allocation aliasing, and view reinterpretation. The standalone presenter also initializes. The report and build logs are under `/Users/ihabfawaqa/Library/Application Support/GOW3Lab/runs/vulkan_20261023_kosmickrisp_m2/`.
 
-The existing local `gpu/shadps4-recompiler/VENDOR.txt` is a separate vendoring record with its own shadPS4/Sirit/SPIRV-Headers revisions and ARM64 port patches. Do not overwrite it with the candidate `gpu/VENDOR.txt` or claim that its shader-only tree contains the Vulkan video core.
+D16S8 and D24S8 are unsupported by the probed device; D32S8 is supported. Guest depth conversion, sampling, stencil behavior, and readback through that fallback are not tested. This is a bounded host capability pass, not a GoW3 rendering pass.
 
-## Platform/configuration findings
+MoltenVK 1.4.2 passes diagnostic presentation and readback cases but fails strict pinned renderer device creation because `robustBufferAccess2` and `nullDescriptor` are missing. No feature-bit bypass is accepted. Its report is `/Users/ihabfawaqa/Library/Application Support/GOW3Lab/runs/vulkan_20261023_moltenvk_m2/vulkan_moltenvk.json`.
 
-The candidate uses C++23 and asks CMake for a shared library. Its `if (NOT WIN32) pkg_check_modules(X11 ...)` condition also includes Apple platforms, so the Linux window-system dependency must be corrected for macOS. The first native configure attempt stopped earlier at `find_package(Vulkan REQUIRED)` because the host has headers but no Vulkan loader library. No system package was installed during this inspection.
+## Production boundary and latest game evidence
 
-Before product import:
+The primary call graph still routes `shim_sceGnmSubmitCommandBuffers(GuestContext*)` to `ps4_gnm_metal_process_command_buffers`; `ps4_gnm_metal_present` owns presentation. The placeholder `gpu/gow3gpu_bridge.cpp` forwards back to Metal and is not the imported backend. The candidate `gow3gpu_resolve(const char *scoped_nid)` returns PS4_SYSV HLE function addresses, so it cannot be cast to the primary runtime's `GuestContext*` shim. The submit-specific adapter has been exercised synthetically, but no application call site invokes it.
 
-1. Create a dedicated worktree/branch for the source integration.
-2. Retain the candidate commit and base shadPS4 commit in this manifest.
-3. Add a macOS platform branch using the selected Vulkan loader and window/presentation path, without dropping renderer features.
-4. Link only one GPU owner to the existing runtime and implement the candidate's actual C ABI from `gpu/gow3gpu.h`.
-5. Record local changes as commits or patches here; do not silently replace vendored files.
-6. Re-run these three regression tests after any source or build-system changes.
+The latest bounded production run is `run_20261023_202535_550108`; it reports `native-metal`. The Sony and Santa Monica cards are correct in captured samples, followed by a blank sample, a severely stretched Kratos face texture, and persistent white/black/white bands. Screenshots, copied logs, and draw traces are under `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-202535/`. The frame trace does not contain the matching per-draw texture/resource snapshots needed to attribute the corruption.
 
-## Current ABI boundary observed
-
-`gpu/gow3gpu.h` defines a C ABI that includes `gow3gpu_register_kernel()`, `gow3gpu_init(const Gow3GpuConfig*)`, `gow3gpu_resolve(const char*)`, `gow3gpu_handle_fault(void*, void*)`, `gow3gpu_dump_guest_writes(void*)`, text/choice input helpers, `gow3gpu_overlay_captures_input()`, and `gow3gpu_symbol_count()`. The exact struct layout and function behavior must be read from that header at integration time. Do not reuse the local placeholder ABI by name alone.
+Do not promote the candidate until the runtime installs its memory and host-service contracts, routes typed GNM imports, establishes one GPU completion/event owner and one VideoOut presenter, and passes a real bounded guest workload with safe teardown.

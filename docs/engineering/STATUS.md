@@ -6,9 +6,9 @@ Updated: 2026-10-23. Current worktree: `luna/gow3-runtime-integration` at `/User
 
 | Area | Status | Evidence |
 |---|---|---|
-| Highest verified graphics milestone | **G2 partial** | Default run `run_20261023_200416_580660` visibly confirms the Sony card at sample 120 and Santa Monica Studio at 780, then an all-white frame at 930, first visibly corrupted gray/black output at 960, and half-black at 1200. No recognizable game image is verified. |
-| Active production renderer | **native Metal** | Latest primary-project run `run_20261023_200416_580660` logged `native-metal` on Apple M2. The GoW3 Vulkan library was not loaded by the game. |
-| Latest bounded game run | **PARTIAL** | Run `run_20261023_200416_580660`: build PASS; ARM64; reached the 60.172-second deadline without a crash; 116 internal frames and 58 logged presents. All 116 frames and logs were copied to `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-200416/`. A separate 45.269-second `GOW3_GCN=1` diagnostic remained mostly black and reported three fragment-shader pairs falling back because MSAA textures are unsupported. |
+| Highest verified graphics milestone | **G2 partial** | Latest run `run_20261023_202535_550108` visibly confirms Sony at sample 120 and Santa Monica Studio through 1410, then black at 1440, a severely stretched Kratos face texture at 1590, and persistent white/black/white bands from 1650 through 5610. No correct game image is verified. |
+| Active production renderer | **native Metal** | Latest primary-project run `run_20261023_202535_550108` logged `native-metal` on Apple M2. The GoW3 Vulkan library was not loaded by the game. |
+| Latest bounded game run | **PARTIAL** | Run `run_20261023_202535_550108`: build PASS in 0.514 seconds; ARM64; reached the 60.872-second deadline without a crash; 188 internal frames, 95 presents, and 128 partial GPU snapshots. All frames, selected screenshots, trace files, and logs were copied to `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-202535/`. A separate 45.269-second `GOW3_GCN=1` diagnostic remained mostly black and reported three fragment-shader pairs falling back because MSAA textures are unsupported. |
 | Source-driven build graph | **PASS** | `tests/test_build_system_idempotence.py` passes; duplicate outputs are rejected; two graph generations are byte-identical. |
 | Candidate application build | **PASS** | The isolated `ninja -j4 ps4_app` built the new marshalling object and linked a Mach-O arm64 executable; `file` and `lipo -archs` both report arm64. The standalone adapter smoke also compiles under `-Wall -Wextra -Werror`. |
 | GoW3 GPU import | **PASS, standalone** | Pinned source `b907d8a9f2324ba5f514fbfe7de803e027c6ca26`, shadPS4 base `b4e7ae776071ceb1dd35004577a8719481e1d258`, full native arm64 CMake build, exports, and ABI smokes verified. GoW3 alias, depth/stencil, and blend CPU regression tests pass. |
@@ -22,7 +22,7 @@ Updated: 2026-10-23. Current worktree: `luna/gow3-runtime-integration` at `/User
 | Gate | Status | Next evidence needed |
 |---|---|---|
 | M0 protected baseline and deterministic ARM64 build | **PASS** | Candidate clean and incremental builds plus two-generation graph test pass. |
-| M1 automated splash/transition capture | **PARTIAL** | Both opening images and the first sampled bad frame are saved; exact content recognition and a PM4 rolling transition trace are not automated. |
+| M1 automated splash/transition capture | **PARTIAL** | Both opening images and the first bad samples are saved; the bounded 1590/1650 draw traces lack matching per-draw texture/resource snapshots, so the producer remains unidentified. |
 | M2 standalone pinned GoW3 GPU | **PASS, limited lifecycle** | Native library, required GoW3 regressions, ABI/init, and candidate raw-HLE PM4 NOP plus queue-drain smoke pass. Teardown and game GuestContext imports are not tested. |
 | M3 Vulkan feature/workload probe | **PASS, bounded** | KosmicKrisp passes the source-derived tested workload; guest depth semantics and full game rendering remain open. |
 | M4 real guest submissions through GoW3 GPU | **PARTIAL** | A synthetic `GuestContext` NOP now reaches the real candidate HLE and Liverpool queue on KosmicKrisp. The application import shim still does not call the candidate, so no real game submission has reached Liverpool. The first smoke exposed early buffer release before `work_retired`; a local wait/notification fix makes the bounded rerun pass. |
@@ -30,7 +30,7 @@ Updated: 2026-10-23. Current worktree: `luna/gow3-runtime-integration` at `/User
 | M6 shader/texture validation | **NOT TESTED** | Capture actual guest shader and descriptors through the candidate backend and validate their contents. |
 | M7 deterministic replay | **NOT TESTED** | No complete guest submission capture exists. |
 | M8–M9 geometry, textures, multipass | **NOT TESTED** | Require a replayable guest workload and attachment evidence. |
-| M10 recognizable post-splash image | **FAIL** | Latest production capture is white/half-black after the Santa Monica splash. |
+| M10 recognizable post-splash image | **FAIL** | Latest production capture is black after the logos, followed by a distorted Kratos face texture and persistent white/black/white bands; no correct scene is verified. |
 | M11–M14 audio/video, menu/gameplay, sustained performance | **NOT TESTED** | Depend on correct guest rendering and real input/presentation integration. |
 
 Overall: **PARTIAL**. Standalone Vulkan/device success and operation counters do not pass M4 or establish game graphics correctness.

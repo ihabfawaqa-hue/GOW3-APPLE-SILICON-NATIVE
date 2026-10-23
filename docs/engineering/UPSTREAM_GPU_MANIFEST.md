@@ -1,6 +1,6 @@
 # Upstream GPU import manifest
 
-Updated: 2026-10-23. This manifest records the source audited for a future import. It does **not** claim the full GPU library is part of the local application yet.
+Updated: 2026-10-23. This manifest records the source snapshot imported into the isolated integration worktree. It does **not** claim the full GPU library is linked into the application.
 
 ## Candidate source
 
@@ -14,9 +14,9 @@ Updated: 2026-10-23. This manifest records the source audited for a future impor
 | License | GPL-2.0-or-later for the GPU source; retain per-file SPDX and third-party license files |
 | Upstream build configuration | CMake, C++23, position-independent code, shared `gow3gpu`; requires Vulkan, fmt, Boost, tsl-robin-map, VMA, xxhash, SDL3, X11 on all non-Windows platforms, Zydis, glslang, and included sirit/FSR Vulkan/miniz components |
 | Tested target architecture | Three pure CPU regression tests compiled and run as macOS arm64; full Vulkan GPU target has not compiled |
-| Local import status | Not imported into the application tree; current local `gpu/gow3gpu_bridge.cpp` remains a placeholder |
+| Local import status | Exact snapshot in `third_party/gow3gpu/` on `luna/gow3gpu-integration`; not linked into `ps4_app`. Current `gpu/gow3gpu_bridge.cpp` remains a placeholder. |
 
-The full candidate `gpu/` is a substantial emulator subsystem: Vulkan Liverpool command processing, video core, shader recompiler, guest-facing shims, and associated libraries. It is not interchangeable with the local `gpu/shadps4-recompiler/` subset. Keep the two source histories separate until a reviewed integration selects exact files and patches.
+The full candidate `gpu/` is a substantial emulator subsystem: Vulkan Liverpool command processing, video core, shader recompiler, guest-facing shims, and associated libraries. An unmodified copy, plus the relative `src/` and `tests/` trees required by CMake, is isolated under `third_party/gow3gpu/`. It is not interchangeable with the local `gpu/shadps4-recompiler/` subset; the two source histories remain separate.
 
 ## GoW3 corrections verified at the candidate commit
 

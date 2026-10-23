@@ -7,8 +7,8 @@ Updated: 2026-10-23. Status values are evidence-based; **NOT TESTED** is not a p
 | M0 | Existing executable architecture | **PASS** | `file` and `lipo -info ps4_app` report Mach-O arm64. |
 | M0 | Source-driven Ninja graph regeneration | **PASS** | Two consecutive generations produced SHA-256 `7a844db1e8d091d830eba76a6bcf61fb083a8300d8a4430cb5049e80a816066b`; build-graph tests verify unique outputs, language rules, and Ninja parsing. |
 | M0 | ARM64 link after regeneration | **PASS** | `ninja -j4 ps4_app` completed as a link-only step; `file ps4_app` and `lipo -info ps4_app` both confirm arm64. |
-| M0 | Incremental build after a source edit | **NOT TESTED** | Must edit/restore one source in an isolated worktree and confirm only its object and final link rebuild. |
-| M0 | Isolated clean build | **NOT TESTED** | Requires a local worktree plus links to the machine-local guest code inputs. |
+| M0 | Incremental build after a source edit | **PASS** | In an isolated worktree, editing then restoring `runtime/kernel/syscalls/ps4_syscalls.c` rebuilt only that C object and the final link each time. |
+| M0 | Isolated clean build | **PASS** | Detached worktree built with four jobs and read-only links to 125 machine-local generated inputs; output is Mach-O arm64. |
 | M1 | Sony and Santa Monica splash rendering | **PARTIAL** | User-reported baseline; internal reference captures are not yet verified. |
 | M1 | Bounded smoke run and internal capture | **PARTIAL** | `python3 scripts/lab/iterate.py --mode smoke --runtime-seconds 45 --no-progress-seconds 25 --max-log-mb 32 --max-capture-mb 512` completed at deadline; 42 frames and a partial draw snapshot were saved under Application Support. Latest frame analysis: all black; both reported splash screens remain unverified by this run. |
 | M2 | GoW3 image-alias regression | **PASS** | Upstream `tests/test_aliasing.cpp`, compiled with `aliasing.cpp` and `host_compatibility.cpp` using native `clang++ -std=c++23`; output `aliasing-test: OK`; binary is Mach-O arm64. |

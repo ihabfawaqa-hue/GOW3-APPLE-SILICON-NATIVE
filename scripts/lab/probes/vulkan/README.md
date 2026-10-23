@@ -7,9 +7,25 @@ This small C++ program measures Vulkan capabilities on the actual Mac and runs r
 ```sh
 cmake -S scripts/lab/probes/vulkan -B /tmp/gow3_vulkan_probe_build -DCMAKE_BUILD_TYPE=Release
 cmake --build /tmp/gow3_vulkan_probe_build -j4
-VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
+VK_DRIVER_FILES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
   /tmp/gow3_vulkan_probe_build/gow3-vulkan-probe --output /tmp/gow3-moltenvk-probe.json
 ```
+
+For KosmicKrisp from LunarG Vulkan SDK 1.4.363.0, source the SDK environment
+script and select its ICD explicitly through the Vulkan loader:
+
+```sh
+source "$HOME/VulkanSDK/1.4.363.0/setup-env.sh"
+VK_DRIVER_FILES="$VULKAN_SDK/share/vulkan/icd.d/libkosmickrisp_icd.json" \
+  /tmp/gow3_vulkan_probe_build/gow3-vulkan-probe --output /tmp/gow3-kosmickrisp-probe.json
+```
+
+The SDK must be installed and its license accepted through LunarG's installer.
+Use the SDK's per-user destination and leave optional system-wide components
+unselected for this probe. The probe runs through the Vulkan loader; direct
+linking to MoltenVK bypasses ICD selection. See [LunarG's macOS Vulkan SDK
+guide](https://vulkan.lunarg.com/doc/view/latest/mac/getting_started.html) for
+the current driver setup and loader requirements.
 
 `--source-instance` intentionally reproduces the pinned source's pre-portability-fix macOS instance policy. On MoltenVK this returns `VK_ERROR_INCOMPATIBLE_DRIVER` before device enumeration. The default probe enables portability enumeration and the portability subset extension when advertised, matching the local Apple source patch; it then separately attempts the unmodified required renderer feature set and a diagnostic supported-feature device.
 

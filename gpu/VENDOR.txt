@@ -1,0 +1,54 @@
+GOW3 ARM64 GPU INTEGRATION AUDIT
+================================
+Audited: 2026-10-23
+
+LOCAL TREE STATE
+----------------
+This working tree does not contain the shadPS4 video core or shader recompiler.
+There is no gpu/shadps4 directory, no shadPS4 submodule, and no Vulkan, SDL3,
+MoltenVK, or KosmicKrisp entry in the active build.ninja link/build rules.
+
+The local gpu/gow3gpu.h and gpu/gow3gpu_bridge.cpp are a small interface and
+forwarding stub. The bridge forwards submissions and presentation to
+ps4_gnm_metal_*; source search found no runtime call sites for gow3gpu_init,
+gow3gpu_submit_command_buffers, or gow3gpu_present. The active GNM path in this
+tree is sceGnmSubmitCommandBuffers -> ps4_gnm_metal_process_command_buffers,
+and VideoOut calls ps4_gnm_metal_present. A runtime log from the Metal
+initializer is required to confirm the backend for each run.
+
+Therefore the earlier descriptions of a vendored shadPS4 implementation,
+GoW3-specific Vulkan changes, a persistent staging pool, and page-fault-window
+adaptations were not verified by this source tree. They are not claims about
+the current binary.
+
+UPSTREAM REFERENCE AUDIT (NO CODE IMPORTED)
+------------------------------------------
+GoW3 port repository:
+  https://github.com/Sohebdsa/gow3_pc
+  Audited branch: gow3
+  Audited commit: b907d8a9f2324ba5f514fbfe7de803e027c6ca26
+  Repository license: GPL-2.0-or-later (per its LICENSE/readme).
+
+That branch contains gpu/shadps4 as a vendored source tree, not as a submodule.
+Its gpu/VENDOR.txt identifies shadPS4 commit
+b4e7ae776071ceb1dd35004577a8719481e1d258 and lists subsequent shader-recompiler
+correctness backports. The vendored license file is GPL-2.0. Its GPU CMake
+target uses Vulkan and the GoW3 port's SDL/Vulkan shims; the build also requires
+SDL3, FFmpeg, glslang, Zydis, Boost, fmt, VMA, and other dependencies. On
+non-Windows hosts that CMake file also requires X11. This is not a drop-in
+Metal implementation; Apple Silicon/Vulkan portability still needs a tested
+Vulkan loader/driver path and adaptation to this project's GuestContext ABI.
+
+Upstream revisions and licenses were inspected for integration planning only.
+No upstream source was copied into this working tree during this audit.
+
+UPDATE 2026-10-23: SHADER RECOMPILER VENDORED
+---------------------------------------------
+The statements above describe the tree at audit time. The shadPS4 shader
+recompiler (GCN to IR to SPIR-V) is now vendored, unmodified apart from the
+listed port edits, under gpu/shadps4-recompiler/. Its pinned sources, licenses,
+local edits, and limits are in gpu/shadps4-recompiler/VENDOR.txt.
+
+The video core, the Vulkan/SDL3 backend, and the GoW3 bridge are still not
+imported. The live renderer (runtime/modules/libSceGnmDriver/ps4_gnm_metal.mm)
+still uses the heuristic MSL substitute and does not call the recompiler yet.

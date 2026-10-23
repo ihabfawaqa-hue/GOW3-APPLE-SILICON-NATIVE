@@ -1,0 +1,142 @@
+GOW3 ARM64 - VENDORED SHADER RECOMPILER
+=======================================
+Vendored: 2026-10-23
+
+UPSTREAM SOURCES (copied unmodified unless listed under "Local modifications")
+-----------------------------------------------------------------------------
+shadPS4  https://github.com/shadps4-emu/shadPS4
+  commit b4e7ae776071ceb1dd35004577a8719481e1d258   (the commit gpu/VENDOR.txt audit pins)
+  src/shader_recompiler/**                   -> src/shader_recompiler/**   (121 files)
+  src/video_core/amdgpu/{pixel_format,regs_shader,regs_vertex,resource,tiling}.h
+  src/video_core/amdgpu/pixel_format.cpp
+  src/common/{types,bit_field,enum,func_traits,object_pool,hash,div_ceil,alignment,
+              thread,signal_context}.h, src/common/logging/classes.h
+  License: GNU GPL v2 (LICENSE-shadPS4-GPL-2.0.txt). Per-file SPDX headers say
+           GPL-2.0-or-later, which matches this port's own files.
+
+sirit    https://github.com/shadps4-emu/sirit
+  commit c58f4d441cfdb6905d011a906704716833485486   (shadPS4 submodule pin)
+  include/, src/                             -> sirit/
+  License: BSD-style (LICENSE-sirit.txt)
+
+SPIRV-Headers  https://github.com/KhronosGroup/SPIRV-Headers
+  commit 2acb319af38d43be3ea76bfabf3998e5281d8d12   (sirit submodule pin)
+  include/spirv/unified1/*.h, *.hpp, *.hpp11 -> SPIRV-Headers/spirv/unified1/
+  License: MIT (LICENSE-SPIRV-Headers.txt)
+
+NOT VENDORED (Homebrew, already installed): fmt 12.x (headers + libfmt),
+magic_enum, boost (container and intrusive headers), SPIRV-Cross 1.4 (MSL, core, glsl).
+spdlog is not used: the logging shim replaces it.
+
+PORT FILES (not upstream, GPL-2.0-or-later like the rest)
+---------------------------------------------------------
+shims/                          Replaces upstream headers that depend on the emulator core:
+                                common/assert.h, common/logging/log.h (spdlog),
+                                common/io_file.h, common/path_util.h, common/arch.h,
+                                common/decoder.h (Zydis), core/emulator_settings.h,
+                                core/signals.h, core/libraries/kernel/process.h,
+                                video_core/buffer_cache/buffer_cache.h.
+                                Shims come first on the include path.
+port/flatten_userdata_arm64.cpp arm64 stand-in for ir/passes/flatten_extended_userdata_pass.cpp
+port/guest_memory.h             Host hook: guest virtual address -> host pointer.
+port/probe/recomp_probe.cpp     Translates a captured draw's VS and PS to SPIR-V and MSL.
+port/probe/verify_probe.sh      Builds the probe, runs it, and checks the MSL with the Metal compiler.
+
+LOCAL MODIFICATIONS TO UPSTREAM FILES (each marked "Port")
+----------------------------------------------------------
+- src/shader_recompiler/ir/breadth_first_search.h: added #include <algorithm>
+  (libc++ requires it for std::ranges::find).
+- src/shader_recompiler/info.h: Info::ReadUdReg dereferences through GuestToHost()
+  instead of treating the guest VA as a host pointer; added #include "port/guest_memory.h".
+- src/shader_recompiler/frontend/fetch_shader.cpp: GetFetchShaderCode() dereferences
+  through GuestToHost().
+- src/shader_recompiler/info.h: adds Info::flat_user_data_reads and
+  Info::flat_user_data_unresolved, filled by the arm64 flatten pass.
+
+EXCLUDED UPSTREAM FILE
+----------------------
+- src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
+  x86-64 only: includes xbyak at the top and JIT-compiles an SRT walker with Zydis.
+  It is not compiled. port/flatten_userdata_arm64.cpp replaces it.
+
+FLATTENED USER DATA (arm64)
+---------------------------
+port/flatten_userdata_arm64.cpp gives each ReadConst whose base is a user-data pair and whose
+index is an immediate its own slot in flattened_ud_buf (slots 16 and up). The driver fills the
+slots from guest memory before each draw (FillFlatBuffer in ps4_gcn_translate.cpp) and binds
+the buffer as bytes. ReadConst with a dynamic index, or a nested base, is marked unresolved and
+the program is rejected.
+
+BUILD
+-----
+Probe (standalone, no app):
+  bash gpu/shadps4-recompiler/port/probe/verify_probe.sh <gpu-captures-dir> <build-dir>
+  Needs C++23 (clang++), Homebrew fmt, magic_enum, boost, spirv-cross, and Xcode's metal
+  compiler.
+App: build.ninja compiles the same sources at C++23 into build/gcn/libgcn_recompiler.a
+  (rule compile_cpp23, shims first on the include path) and links it into ps4_app with
+  runtime/modules/libSceGnmDriver/ps4_gcn_translate.cpp and -lfmt.
+
+LIVE PATH (ps4_gnm_metal.mm, opt-in)
+------------------------------------
+GOW3_GCN=1 selects the translated path. Each draw first tries TryBindTranslatedDraw:
+translate both stages, bind vertex inputs from their V#s, bind buffers and push constants
+from the current descriptors, and create the pipeline from the translated MSL. Any failure
+(translation rejected, unsupported vertex format, MSL or pipeline error) falls back to the
+heuristic path for that draw. Textures are bound from their T#s; samplers use a default sampler.
+The default is the heuristic path, as before. GOW3_GCN_DEBUG=1 also prints the vertex input
+struct and the T# words of each rejected image to stderr.
+
+Descriptor validity: the translator reads V# windows through GuestToHost. Each program records
+those windows (1 KB at each address) and is reused only while the bytes still match.
+Rejected programs are cached too, so a rejected shader is not retranslated every draw.
+
+TILING (driver texture upload, not part of this recompiler)
+-----------------------------------------------------------
+runtime/modules/libSceGnmDriver/ps4_tiling.h untiles a texture's mip 0 before the Metal upload. The
+address math follows shadPS4's tiler (src/video_core/host_shaders/tiling.comp at commit
+b4e7ae776071ceb1dd35004577a8719481e1d258, GPL-2.0-or-later). It covers tile modes 13 (Thin1DThin),
+14 (Thin2DThin), 10 (Display2DThin) and 0..4 (Depth2DThin64..1K). Other modes upload as stored.
+Checks so far: SelfTest (addresses are distinct and inside the surface span) passes for each
+covered mode and several sizes; a 4096x1024 RGBA8 surface (mode 13) and BC1 surfaces (mode 13,
+up to 2048x1024) decode to clean images. Not checked: 2D thin and display with real content (the
+2D surfaces dumped so far were all zero), the 256-byte pipe interleave, and anything about the
+console beyond those images.
+GOW3_DUMP_TEXTURES=<dir> writes the first detiled RGBA8 and BC1 textures as raw rows for inspection.
+
+Logging: the log shim prints the first 16 occurrences of each message, then every 4096th.
+
+KNOWN LIMITATIONS (arm64 port)
+------------------------------
+- Dynamic SRT reads (ReadConst with a non-immediate index, or a nested pointer) are rejected.
+  Their draws use the heuristic path.
+- ReadConstBuffer (s_buffer_load of a V#) sources are not flattened. A program whose sharp comes
+  from one is rejected by the unresolved-sharp check.
+- Direct memory access (buffer device address) is off.
+- Profile is minimal. Optional GPU capability flags are off, so the translator logs
+  "not supported by the GPU" warnings for float32 denorm and signed-zero modes.
+- Decoded from the draw: SPI_PS_INPUT_ENA/ADDR, SPI_PS_IN_CONTROL, SPI_PS_INPUT_CNTL_0..31,
+  SPI_SHADER_COL_FORMAT, SPI_SHADER_Z_FORMAT. The color buffer data and number formats are
+  still fixed to R8G8B8A8 unorm (CB_COLOR formats not decoded).
+- Multisampled (2D MSAA, T# type 14) and integer textures are rejected, so their draws use the
+  heuristic path. Tiled surfaces are detiled on upload (see the TILING note under LIVE PATH);
+  tile modes other than the ones that note lists are uploaded as stored.
+- Sampler state (S#) is not decoded; translated draws use a default sampler.
+- A draw with no pixel shader binds a null fragment function.
+- The VS input class (float, uint, int) is read from the emitted MSL, so the Metal vertex
+  format matches the shader. Functions and pipelines are cached by program id, and each
+  retranslated variant gets a new id, so a variant never reuses a function compiled from older
+  MSL. (The earlier int4 failures came from that stale cache.)
+- Draws whose vertex stage reads zero user data produce empty vertex buffers. The big draw in
+  the capture has this shape (VS user data is zero at that draw), so its geometry is not
+  reliable yet.
+- ps4_app's fallback in build_and_run.sh (no ninja) compiles gpu/*.cpp at C++17 and does not
+  know the recompiler. Use ninja.
+
+VERIFIED
+--------
+verify_probe.sh on runs/run_20261023_005907_519322/gpu-captures, clean build:
+  vs: 165 dwords, fetch shader found, 3 vertex-buffer V# resolved,
+      SPIR-V 4432 words, MSL 9902 bytes, Metal compile (macos-metal2.3) OK.
+  ps: 7 dwords, SPIR-V 592 words, MSL 741 bytes, Metal compile OK.
+NOT VERIFIED: rendered output from the live path. See the status in the run notes.

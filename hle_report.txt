@@ -1,0 +1,79 @@
+PS4Recomp HLE report
+====================
+
+Static inventory of imported symbols (dynamic relocations) and syscall
+numbers recovered from immediates in reachable code. Runtime dlsym names
+and syscall numbers computed in registers are not listed.
+
+DT_NEEDED:
+  libc.prx
+  libkernel.prx
+  libSceAjm.prx
+  libSceAppContent.prx
+  libSceAudioOut.prx
+  libSceAvPlayer.prx
+  libSceCommonDialog.prx
+  libSceFios2.prx
+  libSceGnmDriver_padebug.prx
+  libSceHttp.prx
+  libSceIme.prx
+  libSceNet.prx
+  libSceNetCtl.prx
+  libSceNpManager.prx
+  libSceNpTrophy.prx
+  libSceNpWebApi.prx
+  libSceMsgDialog.prx
+  libScePad.prx
+  libScePlayGo.prx
+  libSceSaveData.prx
+  libSceSaveDataDialog.prx
+  libSceSsl.prx
+  libSceSysmodule.prx
+  libSceSystemService.prx
+  libSceUserService.prx
+  libSceVideoOut.prx
+  libSceVideodec.prx
+
+Imports: 1090 unique names
+  host shim:     312
+  linked PRX:    761
+  defined:       3
+  unresolved:    14 (14 relocs)
+
+Unresolved symbols by library
+
+## A (5)
+  DFmMT80xcNI#A#B              -> sysctl	relocs=1
+  OjWstbIRPUo#A#B              -> __Ux86_64_setcontext	relocs=1
+  VkTAsrZDcJ0#A#B              -> sigfillset	relocs=1
+  kOcnerypnQA#A#B              -> sceKernelGettimezone	relocs=1
+  mo0bFmWppIw#A#B              -> sigreturn	relocs=1
+
+## libScePlayGo (2)
+  73fF1MFU8hA#S#T              -> scePlayGoGetChunkId	relocs=1
+  gUPGiOQ1tmQ#S#T              -> scePlayGoSetToDoList	relocs=1
+
+## plaintext (2)
+  module_start	relocs=1
+  module_stop	relocs=1
+
+## libSceNpManager (1)
+  Ec63y59l9tw#N#O              -> sceNpSetNpTitleId	relocs=1
+
+## libSceNpTrophy (1)
+  aTnHs7W-9Uk#O#P              -> sceNpTrophyAbortHandle	relocs=1
+
+## libSceNpWebApi (1)
+  k210oKgP80Y#P#Q              -> sceNpWebApiGetHttpStatusCode	relocs=1
+
+## libSceSaveData (1)
+  32HQAQdwM2o#U#U              -> sceSaveDataMount	relocs=1
+
+## libkernel (1)
+  iKJMWrAumPE#c#C              -> getargc	relocs=1
+
+Syscalls
+  immediate numbers: 0
+  dynamic sites:     0
+  SYSCALL/SYSENTER:  0
+

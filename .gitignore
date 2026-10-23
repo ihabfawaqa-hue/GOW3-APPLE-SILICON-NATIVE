@@ -1,0 +1,29 @@
+# Local game-specific/generated inputs (keep on this machine, outside Git).
+/guest_image.bin
+/code_*.s
+/code_*.o
+/code_*_reg.c
+/code_*_reg.o
+/guest_modules.c
+/guest_modules_synth.s
+/dispatch.c
+/dispatch.o
+/test_reg.c
+/test_reg.o
+
+# Build products and Ninja state.
+/ps4_app*
+/build/
+*.o
+*.d
+/.ninja_deps
+/.ninja_log
+
+# Proprietary local captures and run output.
+/runs/
+/screenshots/
+
+# Local backups, duplicate patch trees, and host files.
+/gow3-update-patch 4/
+.DS_Store
+__pycache__/

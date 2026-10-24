@@ -20,11 +20,16 @@ Updated: 2026-10-24. Upstream: https://github.com/Sohebdsa/gow3_pc, imported at 
 
 - 88 frames in 12.2 s (7.2 FPS, about 139 ms/frame).
 - Game GPU busy (union of channels) 60%: about 83 ms/frame, of which fragment about 72 ms, vertex about 9 ms, compute about 2 ms.
-- Game GPU idle 40% (about 56 ms/frame), almost all in gaps over 1 ms (about 2.5 per frame, up to 96 ms): CPU/GPU serialization.
-- About 2,000 Metal encoders per second (about 200 per frame) for about 80 guest passes.
+- Game GPU inactive 40% (about 56 ms/frame), almost all in gaps over 1 ms (about 2.5 per frame, up to 96 ms). This alone does not establish CPU/GPU serialization; non-game GPU work overlaps some gaps.
+- The initial estimate was about 2,000 Metal encoders per second. The subsequent ID census finds about 111 render and 169 compute/blit encoders per profiler-assigned frame, rather than 200 render encoders; see `SPARTAN_PROFILE_20261024.md` for methodology and limits.
 - WindowServer used 26% of the GPU over the same span.
 - `Scheduler::BeginRendering` uses `storeOp=Store` for every attachment and `loadOp=Load` unless cleared, including 2x MSAA targets.
 
 ## Per-pass labels
 
 `GOW3_METAL_PASS_LABELS=1` names the Vulkan command buffer before each render pass; KosmicKrisp copies the name onto the Metal command buffer and encoders. Labels appear only when the game is launched under `xctrace record --launch` (not with `--attach`), and the 8-10 s `--window` ring buffer kept only a few app-side encoder rows, so a per-pass ranking is not done yet. Next: launch under xctrace without `--window` for a short gameplay span (start from a save or a shorter scripted path), or use an Xcode GPU frame capture.
+
+Follow-up: the separate `metal-object-label` table recovers more timestamped labels from
+the existing ring captures, but still only 13.8% of game busy time in `mst4`. A full-startup
+launch trace generated an 18.9 GB temporary spool before completion. Do not repeat this
+experiment without writable storage and a guard on the spool and actual free space.

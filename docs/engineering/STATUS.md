@@ -1,5 +1,20 @@
 # Engineering status
 
+## Operation Spartan follow-up, 2026-10-24
+
+The handoff at `d352605` is verified, and diagnostics continue on
+`sol/spartan-profile-attribution`. Native app/GPU builds and the three renderer regressions
+pass. Persistent runtime loading is verified; the `/tmp` runtime description below is
+historical. Two new 245-second bounded runs reach recognizable opening combat gameplay.
+No performance improvement is accepted: a two-frame queue setting did not establish a
+gain, and the production setting is unchanged. The profiling audit corrects the earlier
+render-encoder count and distinguishes game inactivity from device inactivity.
+
+See [the measured audit](SPARTAN_PROFILE_20261024.md) for evidence, partial label ranking,
+capture-storage failure and recovery, queue experiment, unresolved CPU/GPU gap attribution,
+and the internal-resolution experiment gate. Full-startup traces require different storage
+or a shorter deterministic replay; the 1 TB NTFS volume is currently mounted read-only.
+
 Updated: 2026-10-24 (evening). Primary branch remains `luna/operation-spartan`; isolated candidate `luna/gow3-runtime-integration` contains the runtime-route, ARM64 renderer checkpoint, and checked video-decoder HLE. Run artifacts and proprietary assets remain outside Git.
 
 ## Current state

@@ -13,3 +13,27 @@ Use `--build-only` to verify the build and architecture without launching the ga
 To stop an active run, press **Control-C** in its terminal. The runner sends SIGTERM to the process group it started, waits five seconds, then uses SIGKILL on that same group if needed. If the terminal is still open but Control-C is unavailable, send SIGINT to the printed `RUNNER_PID`. The runner will not terminate an already-running `ps4_app` it did not start.
 
 Only `smoke` is advertised. Transition, replay, menu, and gameplay modes are not implemented yet. A captured frame or GPU counter does not prove correct game rendering; visual authenticity remains unverified until a recognized frame is compared with a reliable reference.
+
+## Metal profiling
+
+`record_metal.py --pid <running-game-pid> --output <local-path>.trace` records a short
+attach capture, leaves the game running, and guards actual free disk space and growth of
+Instruments' temporary `instruments*.ktrace` files. The temporary spool can be much larger
+than the final trace bundle. It defaults to 8 seconds, a 1 GiB spool budget and a 6 GiB disk
+reserve. Check the `.recording.json` sidecar for truncation, then confirm the trace can be
+exported. Do not capture an entire startup sequence without a measured spool budget.
+
+Export the `metal-gpu-intervals`, `metal-application-encoders-list`, and
+`metal-object-label` tables with `xctrace export`. Analyze them with:
+
+```sh
+python3 scripts/lab/analyze_metal_trace.py gpu.xml --encoders encoders.xml --object-labels labels.xml
+python3 tests/test_metal_trace_analysis.py
+```
+
+The analyzer joins encoder IDs within a process, uses timestamped object labels as a
+fallback, and computes interval unions instead of adding overlapping stages. It reports
+label coverage, render versus compute/blit encoder counts, and non-game GPU activity
+during game gaps. A partial label ranking cannot establish the most expensive families
+across the whole workload. Instruments frame assignments and guest flip intervals are
+also different from actual display presentation times. Keep all exported tables local.

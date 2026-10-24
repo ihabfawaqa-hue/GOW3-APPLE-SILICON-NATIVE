@@ -93,7 +93,8 @@ static int guest_host_to_guest(void *user_context, const void *host_pointer,
 static int guest_read(void *user_context, uint64_t address, void *destination,
                       uint64_t size) {
   GuestContext *ctx = process_context(user_context);
-  if (!destination || size > SIZE_MAX) return 0;
+  if (!ctx || !destination || address < 0x10000ULL || size > SIZE_MAX)
+    return 0;
   return recomp_guest_gpu_memory_read(ctx, address, destination,
                                       (size_t)size);
 }
@@ -101,7 +102,8 @@ static int guest_read(void *user_context, uint64_t address, void *destination,
 static int guest_atomic_load(void *user_context, uint64_t address, uint32_t size,
                              uint64_t *value) {
   GuestContext *ctx = process_context(user_context);
-  if (!value || (size != 1 && size != 4 && size != 8) || address % size ||
+  if (!value || address < 0x10000ULL ||
+      (size != 1 && size != 4 && size != 8) || address % size ||
       !ctx)
     return 0;
   RecompGuestMemoryLease lease;
@@ -127,7 +129,7 @@ static int guest_atomic_u64(void *user_context, uint64_t address,
                            uint32_t operation, uint64_t operand,
                            uint64_t *previous_value) {
   GuestContext *ctx = process_context(user_context);
-  if (!previous_value || (address & 7) || !ctx)
+  if (!previous_value || address < 0x10000ULL || (address & 7) || !ctx)
     return 0;
   RecompGuestMemoryLease lease;
   if (!recomp_guest_gpu_memory_acquire(
@@ -169,7 +171,8 @@ static int guest_atomic_u64(void *user_context, uint64_t address,
 static int guest_writeback(void *user_context, uint64_t address,
                            const void *source, uint64_t size) {
   GuestContext *ctx = process_context(user_context);
-  if (!source || size > SIZE_MAX) return 0;
+  if (!ctx || !source || address < 0x10000ULL || size > SIZE_MAX)
+    return 0;
   return recomp_guest_gpu_memory_write(ctx, address, source, (size_t)size);
 }
 

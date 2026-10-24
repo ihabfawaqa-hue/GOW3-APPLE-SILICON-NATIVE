@@ -152,8 +152,6 @@ bool recomp_guest_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
 bool recomp_guest_gpu_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
                                      size_t size, int access,
                                      RecompGuestMemoryLease *lease) {
-  if (guest_addr < 0x10000ULL)
-    return false;
   return acquire_guest_memory(ctx, guest_addr, size, access, false, lease);
 }
 

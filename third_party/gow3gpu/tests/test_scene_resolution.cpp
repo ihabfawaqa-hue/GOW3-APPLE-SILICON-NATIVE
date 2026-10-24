@@ -11,6 +11,9 @@
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include <vk_mem_alloc.h>
+#include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/host_shaders/fs_tri_vert.h"
+#include "video_core/host_shaders/ms_sample_pattern_frag.h"
 
 int main() {
     using namespace Vulkan;
@@ -71,7 +74,22 @@ int main() {
         cmd.pipelineBarrier2({.memoryBarrierCount=1,.pMemoryBarriers=&b}, dispatch);
         const vk::BufferImageCopy region{.imageSubresource={aspect,0,0,1},
             .imageOffset={s32(w-1),s32(h-1),0},.imageExtent={1,1,1}};
-        cmd.copyImageToBuffer(image, layout, readback, region, dispatch);
+        const vk::ImageMemoryBarrier2 image_read{
+            .srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask=vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask=vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask=vk::AccessFlagBits2::eTransferRead,
+            .oldLayout=layout,.newLayout=vk::ImageLayout::eTransferSrcOptimal,
+            .image=image,.subresourceRange={aspect,0,1,0,1}};
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&image_read},dispatch);
+        cmd.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, readback, region, dispatch);
+        auto restore=image_read;
+        restore.srcStageMask=vk::PipelineStageFlagBits2::eTransfer;
+        restore.srcAccessMask=vk::AccessFlagBits2::eTransferRead;
+        restore.dstStageMask=vk::PipelineStageFlagBits2::eAllCommands;
+        restore.dstAccessMask=vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+        restore.oldLayout=vk::ImageLayout::eTransferSrcOptimal; restore.newLayout=layout;
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&restore},dispatch);
         const vk::MemoryBarrier2 host{.srcStageMask=vk::PipelineStageFlagBits2::eTransfer,
             .srcAccessMask=vk::AccessFlagBits2::eTransferWrite,
             .dstStageMask=vk::PipelineStageFlagBits2::eHost,
@@ -100,6 +118,120 @@ int main() {
             vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eDepth |
                 vk::ImageAspectFlagBits::eStencil, 0, 1, 0, 1}, dispatch);
     };
+    if (std::getenv("GOW3_DIAGNOSTIC_MSAA_SCALING")) {
+        auto mci = ci;
+        mci.num_samples = 2;
+        const auto msid = images.insert(instance, runtime, views, mci);
+        auto& msimage = images[msid];
+        auto mdi = di;
+        mdi.num_samples = 2;
+        const auto msdid = images.insert(instance, runtime, views, mdi);
+        assert(targets.Eligible(msimage));
+        assert(msimage.backing->image.image_ci.samples == vk::SampleCountFlagBits::e2);
+        const auto device = instance.GetDevice();
+        auto vertex = vk::UniqueShaderModule(CompileSPV(FS_TRI_VERT, device), {device,nullptr,dispatch});
+        auto fragment = vk::UniqueShaderModule(CompileSPV(MS_SAMPLE_PATTERN_FRAG, device), {device,nullptr,dispatch});
+        auto layout = Check(device.createPipelineLayoutUnique({},nullptr,dispatch));
+        const std::array stages{
+            vk::PipelineShaderStageCreateInfo{.stage=vk::ShaderStageFlagBits::eVertex,
+                .module=*vertex, .pName="main"},
+            vk::PipelineShaderStageCreateInfo{.stage=vk::ShaderStageFlagBits::eFragment,
+                .module=*fragment, .pName="main"}};
+        const vk::PipelineVertexInputStateCreateInfo vi{};
+        const vk::PipelineInputAssemblyStateCreateInfo ia{.topology=vk::PrimitiveTopology::eTriangleList};
+        const vk::PipelineViewportStateCreateInfo vp{};
+        const vk::PipelineRasterizationStateCreateInfo rs{.lineWidth=1.f};
+        const vk::PipelineMultisampleStateCreateInfo ms{.rasterizationSamples=vk::SampleCountFlagBits::e2,
+            .sampleShadingEnable=true,.minSampleShading=1.f};
+        const vk::PipelineColorBlendAttachmentState cb{.colorWriteMask=vk::ColorComponentFlagBits::eR |
+            vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA};
+        const vk::PipelineColorBlendStateCreateInfo blend{.attachmentCount=1,.pAttachments=&cb};
+        const std::array states{vk::DynamicState::eViewportWithCount,vk::DynamicState::eScissorWithCount};
+        const vk::PipelineDynamicStateCreateInfo dyn{.dynamicStateCount=2,.pDynamicStates=states.data()};
+        const auto format=ci.pixel_format;
+        const vk::PipelineRenderingCreateInfo rendering{.colorAttachmentCount=1,.pColorAttachmentFormats=&format};
+        auto pattern=Check(device.createGraphicsPipelineUnique(VK_NULL_HANDLE, {
+            .pNext=&rendering,.stageCount=2,.pStages=stages.data(),.pVertexInputState=&vi,
+            .pInputAssemblyState=&ia,.pViewportState=&vp,.pRasterizationState=&rs,
+            .pMultisampleState=&ms,.pColorBlendState=&blend,.pDynamicState=&dyn,.layout=*layout},nullptr,dispatch));
+        for (const auto size : {SceneResolution::Size{1280,720}, SceneResolution::Size{960,540}}) {
+            targets.SetSize(size);
+            // Initialize native content; the production fill must preserve all samples.
+            vk::ClearValue clear{.color={.float32=std::array{0.f,0.f,1.f,1.f}}};
+            runtime.ClearImage(&msimage,{},clear);
+            auto proxy=targets.Attachment(msid,cv);
+            const vk::RenderingAttachmentInfo attachment{.imageView=proxy.view,.imageLayout=proxy.layout,
+                .loadOp=vk::AttachmentLoadOp::eLoad,.storeOp=vk::AttachmentStoreOp::eStore};
+            const auto cmd=scheduler.CommandBuffer();
+            cmd.beginRendering({.renderArea={{0,0},{size.width,size.height}},.layerCount=1,
+                .colorAttachmentCount=1,.pColorAttachments=&attachment},dispatch);
+            cmd.bindPipeline(vk::PipelineBindPoint::eGraphics,*pattern,dispatch);
+            cmd.setViewportWithCount(vk::Viewport{0,0,float(size.width),float(size.height),0,1},dispatch);
+            cmd.setScissorWithCount(vk::Rect2D{{0,0},{size.width,size.height}},dispatch);
+            cmd.draw(3,1,0,0,dispatch);
+            cmd.endRendering(dispatch);
+            scheduler.GetDynamicState().Invalidate();
+            // Resolve via the production native-access path: sample 0 red, sample 1 green.
+            runtime.ResolveImage(&msimage,&images[color_id],{},{});
+            auto rgba=pixel(images[color_id].GetImage(),vk::ImageAspectFlagBits::eColor,
+                vk::ImageLayout::eTransferDstOptimal,1920,1080);
+            assert((rgba & 255)>=127 && (rgba & 255)<=128);
+            assert(((rgba>>8)&255)>=127 && ((rgba>>8)&255)<=128);
+            assert((rgba>>16)==0xff00);
+            // Select sample zero independently: averaging/duplicating samples fails this check.
+            runtime.SetBackingSamples(&msimage,1);
+            rgba=pixel(msimage.GetImage(),vk::ImageAspectFlagBits::eColor,
+                vk::ImageLayout::eColorAttachmentOptimal,1920,1080);
+            assert(rgba==0xff0000ff);
+            runtime.SetBackingSamples(&msimage,2,false);
+            auto& msdepth = images[msdid];
+            assert(targets.Eligible(msdepth));
+            runtime.Transit(&msdepth,vk::ImageLayout::eTransferDstOptimal,
+                vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferWrite);
+            runtime.FlushBarriers();
+            cmd.clearDepthStencilImage(msdepth.GetImage(),vk::ImageLayout::eTransferDstOptimal,
+                vk::ClearDepthStencilValue{0.25f,0xa5},
+                vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eDepth |
+                    vk::ImageAspectFlagBits::eStencil,0,1,0,1},dispatch);
+            auto depth_proxy=targets.Attachment(msdid,dv);
+            const vk::RenderingAttachmentInfo dc{.imageView=depth_proxy.view,
+                .imageLayout=depth_proxy.layout,.loadOp=vk::AttachmentLoadOp::eClear,
+                .storeOp=vk::AttachmentStoreOp::eStore,
+                .clearValue=vk::ClearValue{.depthStencil={0.75f,0x5a}}};
+            cmd.beginRendering({.renderArea={{0,0},{size.width,size.height}},.layerCount=1,
+                .pDepthAttachment=&dc,.pStencilAttachment=&dc},dispatch);
+            cmd.endRendering(dispatch);
+            for (auto* image : {&msdepth,&images[depth_id]}) {
+                runtime.Transit(image,vk::ImageLayout::eDepthStencilAttachmentOptimal,
+                    vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests,
+                    vk::AccessFlagBits2::eDepthStencilAttachmentRead | vk::AccessFlagBits2::eDepthStencilAttachmentWrite);
+            }
+            runtime.FlushBarriers();
+            const auto make_depth_view=[&](vk::Image image) {
+                return Check(device.createImageViewUnique({.image=image,.viewType=vk::ImageViewType::e2D,
+                    .format=di.pixel_format,.subresourceRange={vk::ImageAspectFlagBits::eDepth |
+                        vk::ImageAspectFlagBits::eStencil,0,1,0,1}},nullptr,dispatch));
+            };
+            auto source_depth=make_depth_view(msdepth.GetImage());
+            auto dest_depth=make_depth_view(images[depth_id].GetImage());
+            const vk::RenderingAttachmentInfo resolve_depth{.imageView=*source_depth,
+                .imageLayout=vk::ImageLayout::eDepthStencilAttachmentOptimal,
+                .resolveMode=vk::ResolveModeFlagBits::eSampleZero,.resolveImageView=*dest_depth,
+                .resolveImageLayout=vk::ImageLayout::eDepthStencilAttachmentOptimal,
+                .loadOp=vk::AttachmentLoadOp::eLoad,.storeOp=vk::AttachmentStoreOp::eStore};
+            cmd.beginRendering({.renderArea={{0,0},{1920,1080}},.layerCount=1,
+                .pDepthAttachment=&resolve_depth,.pStencilAttachment=&resolve_depth},dispatch);
+            cmd.endRendering(dispatch);
+            auto depth_value=pixel(images[depth_id].GetImage(),vk::ImageAspectFlagBits::eDepth,
+                vk::ImageLayout::eDepthStencilAttachmentOptimal,1920,1080);
+            assert(std::bit_cast<float>(depth_value)==0.75f);
+            auto stencil_value=pixel(images[depth_id].GetImage(),vk::ImageAspectFlagBits::eStencil,
+                vk::ImageLayout::eDepthStencilAttachmentOptimal,1920,1080);
+            assert((stencil_value&255)==0x5a);
+            std::printf("MSAA sample-preserving %ux%u color/depth/stencil roundtrip PASS\n",size.width,size.height);
+        }
+        scheduler.Finish();
+    }
     constexpr u32 stencil_values[] = {0, 255, 128, 85, 170, 7, 13, 255, 0, 170};
     u32 stencil_index = 0;
     for (int preset : {3,1,4,2,0,3,0,1,0,3}) {

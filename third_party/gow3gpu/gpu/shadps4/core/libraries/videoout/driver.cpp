@@ -333,6 +333,36 @@ void VideoOutDriver::Flip(const Request& req) {
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
 
+    // Opt-in per-flip CPU timing for matched-frame benchmarks. This is the guest flip
+    // service point, not an actual display timestamp and not a GPU timestamp query.
+    static FILE* benchmark = []() -> FILE* {
+        const char* path = std::getenv("GOW3_BENCHMARK_CSV");
+        if (!path || !*path) return nullptr;
+        FILE* file = std::fopen(path, "w");
+        if (file) {
+            std::setvbuf(file, nullptr, _IOLBF, 0);
+            std::fprintf(file, "flip,time_ns,flip_arg,draws,dispatches,submissions,compiles,backing_swaps,swap_pixels,clear_candidates,clear_skips,reduced_draws,scene_draws\n");
+        }
+        return file;
+    }();
+    if (benchmark) {
+        static unsigned long long sequence = 0;
+        const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::fprintf(benchmark, "%llu,%lld,%lld,%llu,%llu,%llu,%u,%llu,%llu,%llu,%llu,%llu,%llu\n", ++sequence,
+                     static_cast<long long>(time_ns), static_cast<long long>(req.flip_arg),
+                     static_cast<unsigned long long>(Gow3Stats::draws.load()),
+                     static_cast<unsigned long long>(Gow3Stats::dispatches.load()),
+                     static_cast<unsigned long long>(Gow3Stats::submissions.load()),
+                     Vulkan::g_gow3_compiles.load(),
+                     static_cast<unsigned long long>(Gow3Stats::backing_swaps.load()),
+                     static_cast<unsigned long long>(Gow3Stats::backing_swap_pixels.load()),
+                     static_cast<unsigned long long>(Gow3Stats::clear_copy_candidates.load()),
+                     static_cast<unsigned long long>(Gow3Stats::clear_copy_skips.load()),
+                     static_cast<unsigned long long>(Gow3Stats::reduced_draws.load()),
+                     static_cast<unsigned long long>(Gow3Stats::scene_draws.load()));
+    }
+
     // gow3: GOW3_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
     static const bool frame_stats = EmulatorSettingsImpl::Flag("GOW3_FRAME_STATS", false);
     if (frame_stats) {

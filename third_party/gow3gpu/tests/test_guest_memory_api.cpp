@@ -7,6 +7,12 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <atomic>
+#include <thread>
+#include <vector>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 namespace {
 struct FakeMemory {
@@ -222,10 +228,29 @@ int main() {
     incomplete_api = api;
     incomplete_api.allocate_process_memory = nullptr;
     assert(gow3gpu_set_guest_memory_api(&incomplete_api) == -1);
+    // Readers may race first publication. They must see either no table or the
+    // complete table, and rejected replacement attempts must never change it.
+    auto* memory = Core::Memory::Instance();
+    assert(!memory->IsValidGpuMapping(0x1000, 4));
+    std::atomic<unsigned> readers_started{};
+    std::vector<std::thread> readers;
+    for (unsigned i = 0; i < 4; ++i) {
+        readers.emplace_back([&] {
+            readers_started.fetch_add(1, std::memory_order_release);
+            while (!memory->IsValidGpuMapping(0x1000, 4)) std::this_thread::yield();
+            for (unsigned n = 0; n < 10000; ++n) {
+                assert(memory->IsValidGpuMapping(0x1000, 4));
+                assert(!memory->IsValidGpuMapping(0x1000, 8));
+            }
+        });
+    }
+    while (readers_started.load(std::memory_order_acquire) < 4) std::this_thread::yield();
     assert(gow3gpu_set_guest_memory_api(&api) == 0);
     assert(gow3gpu_set_guest_memory_api(&api) == -2);
-
-    auto* memory = Core::Memory::Instance();
+    auto rejected = api;
+    rejected.is_mapped = [](void*, uint64_t, uint64_t) { return 0; };
+    for (unsigned n = 0; n < 10000; ++n) assert(gow3gpu_set_guest_memory_api(&rejected) == -2);
+    for (auto& reader : readers) reader.join();
     assert(memory->IsValidGpuMapping(0x1000, 4));
     assert(!memory->IsValidGpuMapping(0x1000, 8));
     assert(memory->ClampRangeSize(0x1000, 8) == 4);
@@ -263,6 +288,18 @@ int main() {
                                    previous_value));
     assert(fake.semaphore == 9);
     assert(memory->AtomicLoad(0x2008, 8, atomic_value) && atomic_value == 9);
+
+    if (std::getenv("GOW3_MEMORY_API_BENCH")) {
+        constexpr unsigned iterations = 3000000;
+        const auto start = std::chrono::steady_clock::now();
+        for (unsigned n = 0; n < iterations; ++n) {
+            assert(memory->AtomicLoad(0x2000, 4, atomic_value));
+            assert(atomic_value == 0x12345678);
+        }
+        const double ns = std::chrono::duration<double, std::nano>(
+            std::chrono::steady_clock::now() - start).count();
+        std::printf("Memory API benchmark: %u loads, %.2f ns/load\n", iterations, ns / iterations);
+    }
 
     std::array<std::uint8_t, 12> copied;
     copied.fill(0xff);

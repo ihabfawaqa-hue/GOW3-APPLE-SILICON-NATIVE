@@ -317,8 +317,17 @@ bool TemporalUpscaler::OnFrameStart() {
     // Dynamic scene resolution scaling (live preset switching) works on all GPUs.
     // On GPUs without D32S8 blit support, UI depth is cleared instead of copied from scene.
     if (!scaled_session) {
-        scene_targets.SetSize(SceneResolution::ForPreset(active ? preset : 0,
-                                                        {target_width, target_height}));
+        auto scene_size = SceneResolution::ForPreset(active ? preset : 0,
+                                                     {target_width, target_height});
+        // Bounded diagnostic matrix; this controls raster targets, never MSAA count.
+        if (const char* size = std::getenv("GOW3_DIAGNOSTIC_SCENE_SIZE")) {
+            if (!std::strcmp(size, "2560x1440")) scene_size = {2560, 1440};
+            else if (!std::strcmp(size, "1920x1080")) scene_size = {1920, 1080};
+            else if (!std::strcmp(size, "1600x900")) scene_size = {1600, 900};
+            else if (!std::strcmp(size, "1280x720")) scene_size = {1280, 720};
+            else if (!std::strcmp(size, "960x540")) scene_size = {960, 540};
+        }
+        scene_targets.SetSize(scene_size);
         render_width = scene_targets.Size().width;
         render_height = scene_targets.Size().height;
     }

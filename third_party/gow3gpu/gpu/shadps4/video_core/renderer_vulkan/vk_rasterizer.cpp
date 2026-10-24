@@ -2999,11 +2999,17 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
     const auto& key = pipeline->GetGraphicsKey();
-    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
+    static const bool diagnostic_msaa_scaling = [] {
+        const char* value = std::getenv("GOW3_DIAGNOSTIC_MSAA_SCALING");
+        return value && value[0] == '1';
+    }();
+    if ((std::popcount(key.mrt_mask & 0x7f) >= 5 ||
+         (diagnostic_msaa_scaling && key.num_samples > 1 && key.mrt_mask)) && db_desc.first &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
-    // A proxy attachment cannot represent MSAA or a feedback loop that reads the
-    // same image through the guest's native descriptor during this draw.
-    bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1;
+    // Feedback loops with native descriptors retain their original size.
+
+    bool reduced = scene_started && upscaler->RasterScaling() &&
+                   (key.num_samples == 1 || diagnostic_msaa_scaling);
     // GOW3_SCENE_DEBUG=<file>: once the file exists, why the passes of one frame keep the
     // native size (see NoteFrameStart).
     const bool debug_pass = scene_debug_frame && scene_started;
@@ -3059,7 +3065,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         std::printf("Scene pass: reduced %d %s\n", reduced, why.c_str());
     }
     push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
-    if (Gow3Stats::enabled) {
+    static const bool scene_benchmark = std::getenv("GOW3_BENCHMARK_CSV") != nullptr;
+    if (Gow3Stats::enabled || scene_benchmark) {
         Gow3Stats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
         Gow3Stats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
     }

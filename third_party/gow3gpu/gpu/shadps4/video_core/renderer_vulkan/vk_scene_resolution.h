@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <array>
+#include <tuple>
 #include <memory>
 #include <optional>
 #include <functional>
@@ -88,7 +89,7 @@ private:
     bool ShaderResampled(const VideoCore::Image&) const;
     void Resample(vk::Image src, vk::Image dst, const VideoCore::Image& original,
                   vk::Extent2D dst_size);
-    vk::Pipeline ResamplePipeline(vk::Format, bool stencil);
+    vk::Pipeline ResamplePipeline(vk::Format, bool stencil, vk::SampleCountFlagBits);
     void CreateResampleResources();
     void Transition(Entry&, vk::ImageAspectFlags, vk::ImageLayout,
                     vk::PipelineStageFlags2, vk::AccessFlags2);
@@ -100,6 +101,7 @@ private:
     std::unordered_map<u64, std::unique_ptr<Entry>> entries; ///< by Key(uid, level)
     std::unordered_set<u64> tracked; ///< uids with proxies
     bool copying = false;
+    bool multisample_scaling = false; ///< diagnostic opt-in, preserves per-sample content
     bool force_stencil_bits = false; ///< test the portable resampler on any driver
     u64 generation = 0;
     mutable std::unordered_map<vk::Format, vk::FormatFeatureFlags> format_features;
@@ -108,8 +110,9 @@ private:
     std::array<std::pair<u64, Entry*>, 8> recent{}; ///< last entries by Key
     u32 recent_next = 0;
     vk::UniqueShaderModule fs_tri_vert, depth_frag, depth_stencil_frag, stencil_bits_frag;
+    vk::UniqueShaderModule color_ms_frag, depth_ms_frag, depth_stencil_ms_frag, stencil_ms_bits_frag;
     vk::UniqueDescriptorSetLayout resample_set_layout;
     vk::UniquePipelineLayout resample_layout;
-    std::vector<std::pair<std::pair<vk::Format, bool>, vk::UniquePipeline>> resample_pipelines;
+    std::vector<std::pair<std::tuple<vk::Format, bool, vk::SampleCountFlagBits>, vk::UniquePipeline>> resample_pipelines;
 };
 } // namespace Vulkan

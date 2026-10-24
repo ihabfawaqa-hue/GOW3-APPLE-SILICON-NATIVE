@@ -714,6 +714,11 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
     if (!backing || backing->num_samples == num_samples) {
         return;
     }
+    Gow3Stats::backing_swaps.fetch_add(1, std::memory_order_relaxed);
+    if (copy_backing) {
+        Gow3Stats::backing_swap_pixels.fetch_add(u64(info.size.width) * info.size.height,
+                                                std::memory_order_relaxed);
+    }
     ASSERT_MSG(!image->info.props.is_depth, "Swapping samples is only valid for color images");
     VideoCore::Image::BackingImage* new_backing;
     auto it = std::ranges::find(backing_images, num_samples,

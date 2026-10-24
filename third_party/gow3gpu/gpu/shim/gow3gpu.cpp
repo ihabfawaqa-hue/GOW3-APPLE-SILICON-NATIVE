@@ -65,19 +65,26 @@ std::vector<Symbol> g_symbols;
 u32 g_sdk_version;
 std::mutex g_guest_memory_api_mutex;
 Gow3GpuGuestMemoryApi g_guest_memory_api{};
-bool g_guest_memory_api_installed{};
+std::atomic_bool g_guest_memory_api_installed{};
 std::atomic_bool g_guest_memory_error_reported{};
 
 bool GetGuestMemoryApi(Gow3GpuGuestMemoryApi& api) {
-    std::scoped_lock lock{g_guest_memory_api_mutex};
-    if (!g_guest_memory_api_installed) return false;
+    // The setter publishes this table once and rejects all replacements. An acquire
+    // makes the immutable table visible without locking on every WAIT_REG_MEM poll,
+    // shader fetch and resource query. Keep the old path for controlled A/B runs.
+    static const bool lock_reads = [] {
+        const char* value = std::getenv("GOW3_LOCK_GUEST_MEMORY_API");
+        return !value || value[0] != '0'; // keep production locked until gameplay gain is proven
+    }();
+    std::unique_lock lock{g_guest_memory_api_mutex, std::defer_lock};
+    if (lock_reads) lock.lock();
+    if (!g_guest_memory_api_installed.load(std::memory_order_acquire)) return false;
     api = g_guest_memory_api;
     return true;
 }
 
 bool GuestMemoryApiInstalled() {
-    std::scoped_lock lock{g_guest_memory_api_mutex};
-    return g_guest_memory_api_installed;
+    return g_guest_memory_api_installed.load(std::memory_order_acquire);
 }
 
 void ReportGuestMemoryError(const char* operation, VAddr address, u64 size) {
@@ -101,9 +108,9 @@ extern "C" int gow3gpu_set_guest_memory_api(const Gow3GpuGuestMemoryApi* api) {
         return -1;
     }
     std::scoped_lock lock{g_guest_memory_api_mutex};
-    if (g_guest_memory_api_installed) return -2;
+    if (g_guest_memory_api_installed.load(std::memory_order_relaxed)) return -2;
     g_guest_memory_api = *api;
-    g_guest_memory_api_installed = true;
+    g_guest_memory_api_installed.store(true, std::memory_order_release);
     return 0;
 }
 

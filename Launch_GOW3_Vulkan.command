@@ -11,6 +11,12 @@ export PS4_STALL_WATCHDOG="${PS4_STALL_WATCHDOG:-3000}"
 export PS4_SCREENSHOT_DIR="${PS4_SCREENSHOT_DIR:-./screenshots}"
 export PS4_SCREENSHOT_EVERY="${PS4_SCREENSHOT_EVERY:-60}"
 
+# GOW3_DISPLAY=2k: borderless fullscreen; on a 2560-wide display (MacBook Air M2:
+# 2560x1664) the 16:9 picture is presented at 2560x1440. The game still renders at 1080p.
+if [ "${GOW3_DISPLAY:-}" = "2k" ]; then
+    export GOW3_FULLSCREEN=1
+fi
+
 LAB_DIR="$HOME/Library/Application Support/GOW3Lab"
 # Versioned GPU library and KosmicKrisp driver (scripts/lab/install_runtime.sh); repoint
 # runtime/current at an older version, or set these variables, to roll back.

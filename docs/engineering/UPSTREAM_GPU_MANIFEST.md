@@ -1,6 +1,6 @@
 # Upstream GPU import manifest
 
-Updated: 2026-10-24. The current isolated import is `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `luna/gow3-runtime-integration`, commit `fe69130` (synthetic submit/queue-retirement fix `a0a7a9d`). The production `ps4_app` still does not load or link this candidate GPU; it continues to use the custom Metal path.
+Updated: 2026-10-24. The current isolated integration branch is `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `luna/gow3-runtime-integration`, at memory-contract commit `4a96b41` after `90f6318` and `0a7642e`. The production `ps4_app` still does not load or link the candidate GPU; it continues to use the custom Metal path.
 
 ## Source and provenance
 
@@ -35,7 +35,9 @@ The local platform changes are committed in the isolated branch and itemized in 
 | Check | Result |
 |---|---|
 | Full candidate GPU CMake target | PASS: `libgow3gpu.dylib` builds as Mach-O arm64 at `/tmp/gow3gpu-runtime-int-build/libgow3gpu.dylib` |
-| Guest-memory contract and host-service callbacks | PASS, synthetic: versioned callbacks and host runtime tests pass; `nm -u` shows no unresolved project `runtime_*` callback imports |
+| Vendored GPU guest-memory/host-runtime API | PASS, synthetic: versioned callbacks and host-service smoke pass. `nm -u` shows no undefined project `runtime_*` symbols; vendored HLE helpers are linked into the dylib. The application has not installed the callback tables. |
+| Runtime guest-memory lease and callback bridge | PASS, synthetic: `python3 tests/test_guest_memory_contract.py` and `/tmp/gow3gpu-runtime-int-smoke-build/gow3gpu-runtime-adapter-smoke` pass with mapped/free ranges, sparse queries, CPU-`PROT_NONE` GPU access, atomics, writeback, reentrant leases and M2 page protection |
+| Candidate ARM64 app build | PASS, not graphics integration: `ninja -j4 ps4_app`; `file` and `lipo -archs` report arm64. The built app still selects native Metal and does not load `libgow3gpu.dylib`. |
 | GNM `GuestContext` submit adapter | PASS, synthetic: validates guest argument arrays, copies bounded DCB/CCB bytes, retains them through submit-done and full retirement, rejects an unmapped array |
 | Candidate renderer and queue smoke | PASS, limited: KosmicKrisp initializes the candidate; a synthetic `GuestContext` PM4 NOP reaches the real candidate HLE and Liverpool queue, which reports `work_retired` before buffer release |
 | Candidate GPU teardown | NOT TESTED: the candidate C ABI still lacks coordinated renderer, kernel-service, SDL/window, and main-queue timer shutdown |
@@ -55,6 +57,6 @@ MoltenVK 1.4.2 passes diagnostic presentation and readback cases but fails stric
 
 The primary call graph still routes `shim_sceGnmSubmitCommandBuffers(GuestContext*)` to `ps4_gnm_metal_process_command_buffers`; `ps4_gnm_metal_present` owns presentation. The placeholder `gpu/gow3gpu_bridge.cpp` forwards back to Metal and is not the imported backend. The candidate `gow3gpu_resolve(const char *scoped_nid)` returns PS4_SYSV HLE function addresses, so it cannot be cast to the primary runtime's `GuestContext*` shim. The submit-specific adapter has been exercised synthetically, but no application call site invokes it.
 
-The latest bounded production run is `run_20261023_203917_961646`; it reports `native-metal`. The Sony card at sample 120 and Santa Monica card through 1440 are visually correct. White samples appear at 1470–1560, corrupted grayscale output appears at 1590, a stretched brown texture at 1620, a white frame at 1650, and a repeated black/white split from 1680 through 5610. Screenshots, copied logs, and selected draw traces are under `/Users/ihabfawaqa/Downloads/GOW3-run-20261023-203917/`. The frame trace does not contain the matching per-draw texture/resource snapshots needed to attribute the corruption. The optional custom Metal GCN translation path remains disabled in the production run.
+The latest bounded production run is `run_20261024_045419_457869`; it reports `native-metal`. Screenshots show the Sony card at sample 30 and Santa Monica Studio at 480. At sample 900 the output becomes a black/white split and remains unchanged through 1290; that final image SHA-256 exactly matches the previous production run's same-index frame. The verified 139-file export is `/Users/ihabfawaqa/Downloads/GOW3-smoke-run-20261024-045419/`. The EOP ordering/clock fixes did not restore a recognizable scene. These production screenshots are separate from the candidate runtime bridge and do not demonstrate shadPS4 execution.
 
 Do not promote the candidate until the runtime installs its memory and host-service contracts, routes typed GNM imports, establishes one GPU completion/event owner and one VideoOut presenter, and passes a real bounded guest workload with safe teardown.

@@ -1,6 +1,6 @@
 # Engineering status
 
-Updated: 2026-10-24. Primary branch remains `luna/operation-spartan`; isolated candidate `luna/gow3-runtime-integration` at `90910f9` has uncommitted runtime-route and ARM64 renderer fixes. Run artifacts and assets remain outside Git.
+Updated: 2026-10-24. Primary branch remains `luna/operation-spartan`; isolated candidate `luna/gow3-runtime-integration` contains the runtime-route and ARM64 renderer checkpoint in commit `9c3aba0`. Run artifacts and proprietary assets remain outside Git.
 
 ## Current state
 

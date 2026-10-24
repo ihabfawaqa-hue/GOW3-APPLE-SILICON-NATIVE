@@ -141,8 +141,10 @@ def render(root: Path) -> str:
         "-framework GameController -framework AudioToolbox -framework ImageIO "
         "-framework MetalFX -framework VideoToolbox -framework CoreMedia "
         "-framework CoreVideo -lz -lpthread -lm -L/opt/homebrew/lib "
+        "-Wl,-rpath,/opt/homebrew/opt/ffmpeg/lib "
         "-L/opt/homebrew/opt/freetype/lib -lfreetype -lspirv-cross-msl "
-        "-lspirv-cross-core -lspirv-cross-glsl -lfmt -lc++"
+        "-lspirv-cross-core -lspirv-cross-glsl -lfmt -lavcodec -lswscale "
+        "-lavutil -lc++"
     )
 
     lines = [

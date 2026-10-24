@@ -47,11 +47,15 @@ SOURCE_FILES = [
     "runtime/modules/libSceGnmDriver/ps4_gnmdriver.c",
     "runtime/modules/libSceVideoOut/ps4_metal_screen.m",
     "runtime/modules/libSceVideoOut/ps4_videoout.c",
+    "runtime/modules/libSceVideodec/ps4_videodec.c",
+    "runtime/modules/libSceVideodec/ps4_videodec.h",
     "scripts/lab/run_iteration.py",
     "scripts/lab/audio_metrics.py",
     "tests/test_audio_metrics.py",
     "tests/test_texture_descriptor_decoding.py",
     "tests/test_authenticity_classifier.py",
+    "tests/test_videodec_h264.py",
+    "tests/test_videodec_resource_info.c",
     "tests/test_shader_telemetry_truth.py",
 ]
 PRESENT_RE = re.compile(

@@ -38,6 +38,6 @@ Project Spartan executes God of War III Remastered natively on Apple Silicon ARM
 - [ ] Validate camera MVP matrices derived from constant buffers without arbitrary scaling.
 
 ### Milestone 5: Audio & Video Media Subsystems (Target: Round 12)
-- [ ] Implement `sceVideodecQueryResourceInfo` and hardware accelerated H.264/AVC decoding via VideoToolbox for opening cinematics.
+- [x] Implement checked `sceVideodecQueryResourceInfo` and H.264/AVC decoding through the ARM64 FFmpeg HLE; verify decoded-to-presented cinematic output through VideoOut.
 - [ ] Complete `libSceAjm` (Audio Joint Module) AT9 / PCM audio output routing to CoreAudio.
 - [ ] Verify 60 FPS gameplay stability on Apple Silicon M2.

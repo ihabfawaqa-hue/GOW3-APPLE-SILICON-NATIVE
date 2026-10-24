@@ -32,6 +32,11 @@ GuestContext *recomp_init_runtime_file(const char *image_filename, size_t reques
 void recomp_init_process_param(GuestContext *ctx, uint64_t proc_param_addr);
 void recomp_init_tls(GuestContext *ctx, uint64_t tls_vaddr, uint64_t tls_filesz, uint64_t tls_memsz, uint64_t tls_align);
 uint64_t recomp_tls_block_offset(const GuestContext *ctx);
+// TLS of loaded PRX modules (libSceFios2, libc) lives below the eboot's static block, in
+// RECOMP_MODULE_TLS_SLOTS slots of RECOMP_MODULE_TLS_SLOT_SIZE bytes (see __tls_get_addr).
+#define RECOMP_MODULE_TLS_SLOT_SIZE 0x800ULL
+#define RECOMP_MODULE_TLS_SLOTS 4ULL
+#define RECOMP_MODULE_TLS_RESERVE (RECOMP_MODULE_TLS_SLOT_SIZE * RECOMP_MODULE_TLS_SLOTS)
 void recomp_setup_entry_args(GuestContext *ctx, int argc, char **argv, uint64_t entry_addr);
 void recomp_dispatch_external(GuestContext *ctx, uint64_t target);
 bool recomp_pc_in_guest_code(uint64_t pc);

@@ -744,13 +744,14 @@ void recomp_init_tls(GuestContext *ctx, uint64_t tls_vaddr, uint64_t tls_filesz,
   // Main thread static TLS area [fs_base - static_tls_size, fs_base): zeroed, with the .tdata
   // template at fs_base - recomp_tls_block_offset() (variant II). recomp_init_runtime
   // reserves 64 KB below the TCB for it.
-  if (static_tls_size > 0x10000ULL) {
+  if (static_tls_size + RECOMP_MODULE_TLS_RESERVE > 0x10000ULL) {
     fprintf(stderr, "[ps4-recomp] FATAL: static TLS 0x%llx exceeds the 64 KB main thread TLS area\n",
             (unsigned long long)static_tls_size);
     abort();
   }
-  if (ctx->mem_base && ctx->fs_base >= static_tls_size) {
-    memset(ctx->mem_base + ctx->fs_base - static_tls_size, 0, static_tls_size);
+  if (ctx->mem_base && ctx->fs_base >= static_tls_size + RECOMP_MODULE_TLS_RESERVE) {
+    memset(ctx->mem_base + ctx->fs_base - static_tls_size - RECOMP_MODULE_TLS_RESERVE, 0,
+           static_tls_size + RECOMP_MODULE_TLS_RESERVE);
     uint64_t block = ctx->fs_base - recomp_tls_block_offset(ctx);
     if (tls_filesz > 0 && tls_filesz <= tls_memsz && tls_vaddr > 0 && tls_vaddr + tls_filesz <= ctx->mem_size) {
       memcpy(ctx->mem_base + block, ctx->mem_base + tls_vaddr, tls_filesz);
@@ -1294,7 +1295,7 @@ GuestContext *recomp_create_thread_context(GuestContext *parent,
   GuestContext *proc = parent->process_ctx ? parent->process_ctx : parent;
 
   uint64_t tls_size = proc->static_tls_size ? proc->static_tls_size : 0x1000ULL;
-  tls_size = (tls_size + 0xFFFULL) & ~0xFFFULL;
+  tls_size = (tls_size + RECOMP_MODULE_TLS_RESERVE + 0xFFFULL) & ~0xFFFULL;
 
   // Allocate stack, TLS area and TCB (64KB) via VM extent allocator
   size_t alloc_total = stack_size + tls_size + 0x10000ULL;

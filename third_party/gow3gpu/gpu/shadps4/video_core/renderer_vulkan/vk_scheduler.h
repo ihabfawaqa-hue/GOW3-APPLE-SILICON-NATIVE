@@ -65,6 +65,34 @@ struct RenderState {
     bool operator==(const RenderState& other) const noexcept {
         return std::memcmp(this, &other, sizeof(RenderState)) == 0;
     }
+
+    [[nodiscard]] bool HasClears() const noexcept {
+        for (u32 i = 0; i < num_color_attachments; ++i) {
+            if (color_attachments[i].is_clear) {
+                return true;
+            }
+        }
+        return depth_stencil_attachment.depth_clear || depth_stencil_attachment.stencil_clear;
+    }
+
+    /// gow3: the same attachments, sizes and layouts once clears are left out. The draws after
+    /// a pass's clearing first draw no longer clear (the clear is done), so `==` against the
+    /// open pass failed and ended it after one draw: a store and reload of every attachment
+    /// for each cleared pass.
+    [[nodiscard]] bool ContinuesWith(const RenderState& next) const noexcept {
+        if (next.HasClears()) {
+            return *this == next;
+        }
+        RenderState open = *this;
+        for (auto& attachment : open.color_attachments) {
+            attachment.clear_value = {};
+            attachment.is_clear = 0;
+        }
+        open.depth_stencil_attachment.clear_value = {};
+        open.depth_stencil_attachment.depth_clear = false;
+        open.depth_stencil_attachment.stencil_clear = false;
+        return open == next;
+    }
 };
 static_assert(std::has_unique_object_representations_v<RenderState>);
 
@@ -713,7 +741,11 @@ public:
     }
 
     /// Ends current rendering scope.
-    void EndRendering();
+    void EndRendering(std::source_location caller = std::source_location::current());
+
+    /// GOW3_PERF_DIAG=1: prints and resets where open render passes were ended (each end is a
+    /// Metal render encoder that stores its attachments, and usually a reload after it).
+    static void ReportPassEnds();
 
     /// Sets a function to be called on every scheduler submission.
     void SetSubmitCallback(SubmitFunc&& on_submit) {
@@ -839,13 +871,22 @@ public:
     void WaitDeferredSignals();
 
     /// Whether a render pass with exactly this state is open.
+    /// GOW3_SPLIT_CLEARED_PASSES=1 restores ending a pass after its clearing draw.
+    [[nodiscard]] bool RenderStateContinues(const RenderState& state) const {
+        static const bool split = [] {
+            const char* value = std::getenv("GOW3_SPLIT_CLEARED_PASSES");
+            return value && value[0] == '1';
+        }();
+        return split ? render_state == state : render_state.ContinuesWith(state);
+    }
+
     [[nodiscard]] bool IsRenderingWith(const RenderState& state) const {
-        return is_rendering && render_state == state;
+        return is_rendering && RenderStateContinues(state);
     }
 
     /// Whether BeginRendering(state) would start a new render pass.
     [[nodiscard]] bool WillBeginRendering(const RenderState& state) const {
-        return !(is_rendering && render_state == state);
+        return !(is_rendering && RenderStateContinues(state));
     }
 
     /// CommandBuffer() calls that waited for a recording thread (GOW3_FRAME_STATS).

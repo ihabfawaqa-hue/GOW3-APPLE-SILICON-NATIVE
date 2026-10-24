@@ -117,3 +117,89 @@ Checked against the code and run logs:
   blocker for longer benchmarks.
 - `DrawPipe::Run` and `Semaphore::Wait` spin while waiting; they burn a core each. Harmless
   for throughput on the 8-core M2 now, but worth turning into blocking waits for power and heat.
+
+# Part 2: per-pass GPU attribution and pass splits
+
+## Attribution method
+
+Instruments kept encoder labels for 5% of GPU busy time (54 label events for ~12,000 encoders),
+so its ranking was unusable. KosmicKrisp's Metal 4 commit feedback already carries
+`GPUStartTime`/`GPUEndTime`; a local driver patch (`scripts/lab/patches/kosmickrisp-diagnostics.patch`,
+`MESA_KK_GPU_TIMES`) logs them per commit with the command buffer's name, and
+`GOW3_DIAGNOSTIC_PASS_SUBMIT=1` puts each render pass in its own commit. A first version flushed
+inside `Scheduler::BeginRendering`, after the draw had already bound its pipeline and
+resources into the previous command buffer: output went black (and ran at a meaningless
+20 FPS). The working version flushes in `DrawRecord` when the targets change, before binding.
+
+Before the fixes below (run `…191415…`, 281 gameplay frames, ~104 ms GPU busy per frame in
+this mode):
+
+| Pass (render targets) | GPU ms/frame | Commits/frame |
+|---|---:|---:|
+| 1920×1080 2×MSAA RGBA8 sRGB + D32S8 (scene) | 18.8 | 10.3 |
+| no attachments, 16384×16384, vertex shader only (`vs=c82987896214bdaa`, no pixel shader) | 18.1 | 10.1 |
+| 960×540 RGBA8 UNORM | 14.7 | 4.1 |
+| 1920×1080 RGBA8 sRGB | 13.2 | 5.7 |
+| 1920×1080 RGBA8 sRGB + D32S8 | 8.8 | 2.9 |
+| 2048² D32S8 shadow cascades | 3.1 | 18.0 |
+
+## Pass-end census (`GOW3_PERF_DIAG=1`, ~48 frames per window)
+
+| Site | Before | After |
+|---|---:|---:|
+| `ObjectMotion::OnFrameStart` (`vk_object_motion.cpp:126`) | 11–161 per frame | 1 per frame |
+| `Runtime::FlushBarriers` | ~47 per frame; the same pass resumed after ~1 | unchanged |
+| target change (`Scheduler::BeginRendering`) | ~17–21 per frame | unchanged |
+
+## Changes
+
+| Change | Where | Toggle to restore |
+|---|---|---|
+| Frame-start work (camera/object motion, upscaler, GPU frame count) runs once per display-buffer run, not on every HUD draw into the display buffer. Each extra call ended the open pass and also advanced the motion history and dropped camera history | `vk_rasterizer.cpp` `DrawRecord` | `GOW3_FRAME_START_EVERY_DISPLAY_DRAW=1` |
+| A pass after its clearing draw continues: `RenderState` equality ignores clear flags and values when the next state does not clear (Argon finding 1) | `vk_scheduler.h/.cpp` | `GOW3_SPLIT_CLEARED_PASSES=1` |
+| Attachment-less passes use the guest screen scissor as render area instead of 16384² | `BeginRenderingFull` | `GOW3_ATTACHMENTLESS_FULL_AREA=1` |
+| PRX module TLS (libSceFios2, libc) gets its own per-thread slots below the eboot block; previously their `tls_index` offsets (0–0x38, 0x188; module id always 0) aliased the eboot's first TLS variables | `ps4_threading.c`, `recomp_runtime.c/.h` | none |
+| VBlank/flip status use the guest TSC (2.13 GHz) and process time (µs) instead of raw 24 MHz ticks and Unix time | `ps4_videoout.c` | none |
+| `InvalidateMemory` returns before draining the draw pipe when the range is not GPU-mapped | `vk_rasterizer.cpp` | none |
+| Diagnostics: per-pass submit, driver GPU times, pass-end census, one-time logs if the game calls `sceGnmSubmitAndFlipCommandBuffers`/`sceGnmInsertWaitFlipDone` | various | diagnostic only |
+
+## Results
+
+- **Crash:** the post-movie `Unresolved indirect jump ... RIP=0x1b50150` (in libSceFios2,
+  after `my_decode_thread` exits) did not recur in three runs of 250–260 s. It used to appear at
+  229–242 s. This is consistent with the TLS aliasing being its cause, but it is not proven.
+- **Rendering:** combat-tutorial frames render correctly with all changes; an earlier
+  hazy frame was a different scene (burning forest), confirmed by an A/B with the changes off.
+- **Diagnostic mode:** GPU busy per frame went from 104 to 74 ms. The attachment-less pass
+  left the top of the ranking.
+- **Normal submission:** the frame rate did not measurably change. Windows at 2,500–3,300 draws
+  stay at 9–11 FPS, GPU-bound (84–90% GPU-tick waits), before and after. Runs land at different
+  points of the opening (draw counts 1,900–3,500), which limits single-run comparisons.
+- `GOW3_UPSCALER=off GOW3_OBJECT_MOTION=0` measured 8.6–9.2 FPS at 1,900–2,650 draws: no gain.
+  FSR 3.1 at native resolution and the motion target are not the bottleneck.
+
+## Rejected or not applicable
+
+- **Flip ordering:** the game never calls `sceGnmSubmitAndFlipCommandBuffers` or
+  `sceGnmInsertWaitFlipDone` (one-time logs never fired), so the CPU-flip ordering finding
+  does not affect it.
+- **VM extent fragmentation from GPU page protection:** GPU protection calls `mprotect`
+  directly and never splits `GuestVMExtent` nodes; only guest `mprotect` does.
+- **Moving `EmitVertexBuffers` after `FlushBarriers`:** vertex and index bindings are command-buffer
+  state, not tied to a pass; the split comes from the barrier itself.
+- **Spin-waits:** the command thread's `Semaphore::Wait` samples are a kernel block
+  (`waitUntilSignaledValue` → `iokit_user_client_trap`), as is Metal's submission queue. The
+  draw pipe spins at most 50 µs on this 8-thread machine before sleeping.
+- **Removing the notify before `pread`:** it resolves pending GPU readbacks before the file data
+  lands. Without it, a readback could overwrite freshly read data.
+
+## Next
+
+The GPU executes about 70–90 ms of real work per frame, independent of resolution, FSR and
+pass splitting. The largest families are the scene MSAA pass (re-entered ~10 times a frame,
+alternating with the vertex-only pass), a 960×540 pass at ~4 ms per instance, and 1080p post
+passes. Per-draw and per-shader cost is the next level: a bounded Metal GPU capture
+(`MESA_KK_CAPTURE_TRIGGER`) of one gameplay frame for Xcode's shader profiler, and running the
+vertex-only draws inside the scene pass (a pipeline variant with the scene's attachment
+formats and writes disabled) so the scene's MSAA targets are not stored and reloaded ten times
+a frame.

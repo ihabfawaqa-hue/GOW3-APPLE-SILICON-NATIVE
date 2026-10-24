@@ -37,3 +37,21 @@ label coverage, render versus compute/blit encoder counts, and non-game GPU acti
 during game gaps. A partial label ranking cannot establish the most expensive families
 across the whole workload. Instruments frame assignments and guest flip intervals are
 also different from actual display presentation times. Keep all exported tables local.
+
+## Per-pass GPU time (KosmicKrisp commit feedback)
+
+Instruments recorded encoder labels for only ~5% of GPU busy time. Exact per-pass GPU time
+comes from the driver instead. Apply `patches/kosmickrisp-diagnostics.patch` to the Mesa tree
+(it adds `MESA_KK_GPU_TIMES=<file>`: one line per Metal commit with GPU start/end and the command
+buffer's name), rebuild and install the runtime, then run with:
+
+```sh
+GOW3_METAL_PASS_LABELS=1 GOW3_DIAGNOSTIC_PASS_SUBMIT=1 MESA_KK_GPU_TIMES=kk_times.csv \
+GOW3_BENCHMARK_CSV=bench.csv
+python3 scripts/lab/pass_gpu_times.py kk_times.csv bench.csv 300
+```
+
+`GOW3_DIAGNOSTIC_PASS_SUBMIT=1` submits whenever the render targets change (before the draw
+binds anything), so each commit holds one pass plus the work up to the next. It multiplies
+submissions; use it only for attribution. `GOW3_PERF_DIAG=1` also prints `Pass end:` lines:
+where render passes were ended, and how often the same pass resumed right after (a split).

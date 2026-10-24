@@ -1181,6 +1181,30 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     DrawRecord(pipeline, used_prepared, is_indexed, index_offset);
 }
 
+// gow3: GOW3_DIAGNOSTIC_PASS_SUBMIT=1 (with GOW3_METAL_PASS_LABELS) submits whenever the render
+// targets change, before the draw binds anything, so each Metal commit holds one pass (plus the
+// work up to the next one). With MESA_KK_GPU_TIMES the driver then logs GPU time per pass.
+// Diagnostic only: it multiplies submissions.
+void Rasterizer::DiagnosticPassSubmit() {
+    static const bool pass_submit = [] {
+        const char* value = std::getenv("GOW3_DIAGNOSTIC_PASS_SUBMIT");
+        return value && value[0] == '1' && Scheduler::PassLabelsEnabled();
+    }();
+    if (!pass_submit) {
+        return;
+    }
+    std::array<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1> targets{};
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        targets[cb] = cb_descs[cb].first;
+    }
+    targets.back() = db_desc.first;
+    if (targets != diagnostic_pass_targets) {
+        diagnostic_pass_targets = targets;
+        scheduler.EndRendering();
+        scheduler.Flush();
+    }
+}
+
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
     if (DrawPipe::OnStageB()) {
@@ -1189,9 +1213,23 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     const auto& regs = Regs();
     // gow3: the pass copying a finished frame to a display buffer; the previous draw's
-    // target is that frame.
-    if (camera_motion->Enabled() && regs.color_buffers[0] &&
-        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+    // target is that frame. Only its first draw starts a frame: the HUD draws that follow into
+    // the same display buffer (11-128 a frame) each ran this, which advanced the motion history
+    // that many times, dropped the camera history, and ended the open render pass every time.
+    // GOW3_FRAME_START_EVERY_DISPLAY_DRAW=1 restores that.
+    const VAddr display_address =
+        camera_motion->Enabled() && regs.color_buffers[0] &&
+                FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())
+            ? regs.color_buffers[0].Address()
+            : 0;
+    static const bool every_display_draw = [] {
+        const char* value = std::getenv("GOW3_FRAME_START_EVERY_DISPLAY_DRAW");
+        return value && value[0] == '1';
+    }();
+    const bool frame_start =
+        display_address && (every_display_draw || display_address != last_display_address);
+    last_display_address = display_address;
+    if (frame_start) {
         scene_started = false;
         camera_motion->OnDisplayPass(cb_descs[0].first);
         if (upscaler->OnFrameStart()) {
@@ -1210,6 +1248,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_geometry = 0;
 
     PrepareRenderState(pipeline);
+    DiagnosticPassSubmit();
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
@@ -1440,6 +1479,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     motion_draw = false;
     motion_geometry = 0;
     PrepareRenderState(pipeline);
+    DiagnosticPassSubmit();
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
@@ -3305,6 +3345,21 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
         DumpPassTargets(state.num_color_attachments);
     }
+    // gow3: a pass without attachments (vertex-only draws, e.g. with rasterization killed) took
+    // the maximum framebuffer size, 16384x16384. KosmicKrisp makes that a Metal render pass of
+    // that area, which cost ~1.8 ms of GPU time per pass on M2 (about 18 ms per gameplay frame)
+    // with nothing drawn. Nothing outside the screen scissor can be rasterized, and the driver
+    // clamps scissors to the render area. GOW3_ATTACHMENTLESS_FULL_AREA=1 restores the old size.
+    static const bool full_area = [] {
+        const char* value = std::getenv("GOW3_ATTACHMENTLESS_FULL_AREA");
+        return value && value[0] == '1';
+    }();
+    if (!full_area && state.num_color_attachments == 0 &&
+        !state.depth_stencil_attachment.has_depth && !state.depth_stencil_attachment.has_stencil) {
+        const auto& scissor = regs.screen_scissor;
+        state.width = static_cast<u16>(std::clamp<s32>(scissor.bottom_right_x, 1, state.width));
+        state.height = static_cast<u16>(std::clamp<s32>(scissor.bottom_right_y, 1, state.height));
+    }
     if (Scheduler::PassLabelsEnabled()) {
         std::string label = "pass";
         const auto describe = [&](const VideoCore::ImageId id) {
@@ -3321,6 +3376,16 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         if (db_desc.first) {
             label += " depth";
             describe(db_desc.first);
+        }
+        if (label == "pass") {
+            // No texture-cache attachment: say what the pass does draw into.
+            const auto& gkey = pipeline->GetGraphicsKey();
+            label += fmt::format(" none {}x{} colors={} depth={} stencil={} mrt={:x} vs={:x} ps={:x}",
+                                 state.width, state.height, state.num_color_attachments,
+                                 state.depth_stencil_attachment.has_depth,
+                                 state.depth_stencil_attachment.has_stencil, gkey.mrt_mask,
+                                 gkey.stage_hashes[static_cast<u32>(Shader::SwStage::Vertex)],
+                                 gkey.stage_hashes[static_cast<u32>(Shader::SwStage::Fragment)]);
         }
         scheduler.SetPassLabel(std::move(label));
     }
@@ -3471,11 +3536,12 @@ u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {
 }
 
 bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
-    DrainDrawPipe();
+    // gow3: memory the GPU has never mapped needs nothing, and must not wait for the draw
+    // recording thread: file and audio stream reads into guest buffers notify every write.
     if (!IsMapped(addr, size)) {
-        // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
+    DrainDrawPipe();
     texture_cache.ResolveReadbacks(addr, size, assume_locks, VideoCore::ReadbackSource::CpuWrite);
     buffer_cache.InvalidateMemory(addr, size, assume_locks);
     texture_cache.InvalidateMemory(addr, size);

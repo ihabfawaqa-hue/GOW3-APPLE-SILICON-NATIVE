@@ -2,6 +2,8 @@
 #include "ps4_metal_screen.h"
 #include "../../core/gow3gpu_gnm_adapter.h"
 #include "../../core/gow3gpu_runtime_loader.h"
+#include "../../core/recomp_context.h"
+#include "../libkernel/ps4_kernel_sys.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -88,20 +90,16 @@ static pthread_t g_vblank_thread;
 static int g_vblank_thread_started = 0;
 static volatile int g_vblank_thread_running = 1;
 
+// VBlank and flip status times use the guest's clocks: process time in microseconds
+// (sceKernelGetProcessTime) and the TSC at RECOMP_TSC_FREQ (sceKernelReadTsc). They were the
+// Unix time and the raw 24 MHz counter, so a game comparing them with its own clock readings
+// (frame pacing, movie and audio sync) saw vblanks advance 88.75 times too slowly.
 static uint64_t get_time_usec(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+    return sceKernelGetProcessTime();
 }
 
 static uint64_t get_fake_tsc(void) {
-#if defined(__aarch64__)
-    uint64_t val;
-    asm volatile("mrs %0, cntvct_el0" : "=r"(val));
-    return val;
-#else
-    return get_time_usec() * 2000ULL;
-#endif
+    return recomp_rdtsc();
 }
 
 static void *vblank_thread_func(void *arg) {

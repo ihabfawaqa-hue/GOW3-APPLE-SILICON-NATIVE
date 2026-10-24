@@ -1,0 +1,123 @@
+diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+index 5509318..f707fb7 100644
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -17,6 +17,69 @@
+ #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+ 
+ #include "vk_cmd_queue.h"
++#include "util/u_debug.h"
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++/* Local opt-in diagnostic: capture a bounded set of submissions after startup.
++ * No queue drain or wait is added. The installed production driver is unchanged.
++ */
++static void
++kk_poll_capture_trigger(struct kk_device *dev)
++{
++   const char *trigger = debug_get_option("MESA_KK_CAPTURE_TRIGGER", NULL);
++   if (!trigger)
++      return;
++   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++   static unsigned remaining;
++   static bool captured;
++   pthread_mutex_lock(&lock);
++   if (remaining) {
++      if (--remaining == 0) {
++         mtl_stop_gpu_capture();
++         fprintf(stderr, "[spartan-capture] stopped bounded Metal capture\n");
++      }
++   } else if (!captured && unlink(trigger) == 0) {
++      const char *directory = debug_get_option("MESA_KK_GPU_CAPTURE_DIRECTORY", NULL);
++      mtl_start_gpu_capture(dev->mtl_handle, directory);
++      remaining = 8;
++      captured = true;
++      fprintf(stderr, "[spartan-capture] started capture for eight submissions\n");
++   }
++   pthread_mutex_unlock(&lock);
++}
++
++/* Local opt-in diagnostic: MESA_KK_GPU_TIMES=<file> writes one line per Metal
++ * commit: GPU start and end (seconds, Metal clock) and the Vulkan command
++ * buffer's debug name. It reuses the commit feedback the queue already requests
++ * and adds no waits.
++ */
++struct kk_timed_commit {
++   struct kk_device *dev;
++   char label[240];
++};
++
++static pthread_once_t kk_gpu_times_once = PTHREAD_ONCE_INIT;
++static pthread_mutex_t kk_gpu_times_lock = PTHREAD_MUTEX_INITIALIZER;
++static FILE *kk_gpu_times_file;
++
++static void
++kk_gpu_times_open(void)
++{
++   const char *path = debug_get_option("MESA_KK_GPU_TIMES", NULL);
++   kk_gpu_times_file = path ? fopen(path, "w") : NULL;
++   if (kk_gpu_times_file)
++      setvbuf(kk_gpu_times_file, NULL, _IOFBF, 1 << 20);
++}
++
++static FILE *
++kk_gpu_times(void)
++{
++   pthread_once(&kk_gpu_times_once, kk_gpu_times_open);
++   return kk_gpu_times_file;
++}
+ 
+ struct kk_commit_data {
+    struct kk_queue *queue;
+@@ -56,6 +119,20 @@ commit_callback(struct mtl_feedback_data *data)
+    check_device_lost((struct kk_device *)data->user_data, data);
+ }
+ 
++static void
++timed_commit_callback(struct mtl_feedback_data *data)
++{
++   struct kk_timed_commit *commit = (struct kk_timed_commit *)data->user_data;
++   check_device_lost(commit->dev, data);
++   FILE *file = kk_gpu_times();
++   if (file) {
++      pthread_mutex_lock(&kk_gpu_times_lock);
++      fprintf(file, "%.9f,%.9f,%s\n", data->gpu_start, data->gpu_end, commit->label);
++      pthread_mutex_unlock(&kk_gpu_times_lock);
++   }
++   free(commit);
++}
++
+ static void
+ rerecord_commit_callback(struct mtl_feedback_data *data)
+ {
+@@ -178,6 +255,8 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
+    struct kk_queue *queue = container_of(vk_queue, struct kk_queue, vk);
+    struct kk_device *dev = kk_queue_device(queue);
+ 
++   kk_poll_capture_trigger(dev);
++
+    if (vk_queue_is_lost(&queue->vk))
+       return VK_ERROR_DEVICE_LOST;
+ 
+@@ -210,7 +289,17 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
+          if (result != VK_SUCCESS)
+             return result;
+       } else if (kk_cmd_buffer_has_work(cmd_buffer)) {
+-         kk_queue_commit(queue, cmd_buffer, commit_callback, dev);
++         struct kk_timed_commit *timed =
++            kk_gpu_times() ? malloc(sizeof(*timed)) : NULL;
++         if (timed) {
++            timed->dev = dev;
++            snprintf(timed->label, sizeof(timed->label), "%s",
++                     cmd_buffer->vk.base.object_name ? cmd_buffer->vk.base.object_name
++                                                     : "");
++            kk_queue_commit(queue, cmd_buffer, timed_commit_callback, timed);
++         } else {
++            kk_queue_commit(queue, cmd_buffer, commit_callback, dev);
++         }
+       }
+ 
+       cmd_buffer->submitted = true;

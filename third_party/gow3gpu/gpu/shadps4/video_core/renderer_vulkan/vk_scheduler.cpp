@@ -57,11 +57,31 @@ Scheduler::~Scheduler() {
 #endif
 }
 
+namespace {
+struct PassEndSite {
+    const char* file;
+    unsigned line;
+    u64 count;
+    u64 resumed; ///< the same pass began again right after this end: a split
+};
+std::mutex pass_end_mutex;
+std::array<PassEndSite, 48> pass_end_sites{};
+PassEndSite* last_pass_end{};
+RenderState last_ended_state{};
+} // namespace
+
 void Scheduler::BeginRendering(const RenderState& new_state) {
-    if (is_rendering && render_state == new_state) {
+    if (is_rendering && RenderStateContinues(new_state)) {
         return;
     }
     EndRendering();
+    if (WaitDiagnostics::Enabled()) {
+        std::scoped_lock lock{pass_end_mutex};
+        if (last_pass_end && last_ended_state.ContinuesWith(new_state)) {
+            ++last_pass_end->resumed;
+        }
+        last_pass_end = nullptr;
+    }
     is_rendering = true;
     render_state = new_state;
 
@@ -136,9 +156,50 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     });
 }
 
-void Scheduler::EndRendering() {
+
+void Scheduler::ReportPassEnds() {
+    if (!WaitDiagnostics::Enabled()) {
+        return;
+    }
+    std::array<PassEndSite, 48> sites;
+    {
+        std::scoped_lock lock{pass_end_mutex};
+        sites = pass_end_sites;
+        pass_end_sites = {};
+        last_pass_end = nullptr;
+    }
+    std::sort(sites.begin(), sites.end(),
+              [](const PassEndSite& a, const PassEndSite& b) { return a.count > b.count; });
+    for (const auto& site : sites) {
+        if (!site.count) {
+            break;
+        }
+        const std::string_view file{site.file};
+        const auto name = file.substr(file.find_last_of("/\\") + 1);
+        std::printf("Pass end: %.*s:%u; %llu, of which the same pass resumed %llu\n",
+                    int(name.size()), name.data(), site.line,
+                    static_cast<unsigned long long>(site.count),
+                    static_cast<unsigned long long>(site.resumed));
+    }
+}
+
+void Scheduler::EndRendering(std::source_location caller) {
     if (!is_rendering) {
         return;
+    }
+    if (WaitDiagnostics::Enabled()) {
+        std::scoped_lock lock{pass_end_mutex};
+        for (auto& site : pass_end_sites) {
+            if (!site.count || (site.line == caller.line() &&
+                                std::string_view{site.file} == caller.file_name())) {
+                site.file = caller.file_name();
+                site.line = caller.line();
+                ++site.count;
+                last_pass_end = &site;
+                last_ended_state = render_state;
+                break;
+            }
+        }
     }
     is_rendering = false;
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
@@ -404,6 +465,11 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
     current_cmdbuf = command_pool.Commit();
     Check(current_cmdbuf.begin(begin_info));
+    if (PassLabelsEnabled()) {
+        // Pooled command buffers keep their last debug name: reset it so work without a
+        // render pass is not attributed to an older one.
+        SetObjectName(instance.GetDevice(), current_cmdbuf, std::string_view{"nopass"});
+    }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();

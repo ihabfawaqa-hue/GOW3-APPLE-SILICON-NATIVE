@@ -411,6 +411,9 @@ int32_t sceGnmInsertThreadTraceMarker(void) {
 int32_t sceGnmInsertWaitFlipDone(uint32_t *cmdbuf, uint32_t size, int32_t vo_handle, uint32_t buf_idx) {
     (void)vo_handle;
     (void)buf_idx;
+    static int logged;
+    if (!logged++)
+        fprintf(stderr, "[gnm] sceGnmInsertWaitFlipDone called (emits an always-true wait)\n");
     if (!cmdbuf || size < 7) return -1;
     cmdbuf[0] = PM4_TYPE3_HEADER(PM4_IT_WAIT_REG_MEM, 5, 0, 0);
     cmdbuf[1] = 0x3; // MEM_SPACE_REGISTER | FUNCTION_EQUAL
@@ -960,6 +963,9 @@ int32_t sceGnmSubmitAndFlipCommandBuffers(GuestContext *ctx, uint32_t count,
         }
     }
 
+    static int logged;
+    if (!logged++)
+        fprintf(stderr, "[gnm] sceGnmSubmitAndFlipCommandBuffers called (CPU flip after submit)\n");
     pthread_mutex_lock(&g_gnm_mutex);
     ps4_gnm_process_command_buffers(ctx, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes);
     g_submitted_frames++;

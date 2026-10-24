@@ -1,6 +1,8 @@
 #include "recomp_runtime.h"
 #include "ps4_threading.h"
+#include "../../modules/libkernel/ps4_sysmodule.h"
 #include <errno.h>
+#include <string.h>
 #include <sched.h>
 #include <signal.h>
 
@@ -1155,14 +1157,70 @@ void shim_scePthreadGetspecific(GuestContext *ctx) {
   shim_pthread_getspecific(ctx);
 }
 
+// TLS slot (0..RECOMP_MODULE_TLS_SLOTS-1) of the PRX module whose tls_index this is, or -1 for
+// the eboot (and anything not identified). The loader leaves tls_index.module at 0 for every
+// module, so the module is found from where its tls_index lives.
+static int module_tls_slot(uint64_t ti_addr) {
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  static struct { uint64_t ti_addr; int slot; } known[64];
+  static int num_known;
+  static const RecompModuleUnwindInfo *slot_module[RECOMP_MODULE_TLS_SLOTS];
+  pthread_mutex_lock(&lock);
+  for (int i = 0; i < num_known; i++) {
+    if (known[i].ti_addr == ti_addr) {
+      const int slot = known[i].slot;
+      pthread_mutex_unlock(&lock);
+      return slot;
+    }
+  }
+  int slot = -1;
+  const RecompModuleUnwindInfo *module = recomp_module_find_by_addr(ti_addr);
+  if (module && module->name && strcmp(module->name, "eboot.bin") != 0) {
+    for (int i = 0; i < (int)RECOMP_MODULE_TLS_SLOTS; i++) {
+      if (!slot_module[i] || slot_module[i] == module) {
+        slot_module[i] = module;
+        slot = i;
+        break;
+      }
+    }
+    if (slot < 0)
+      fprintf(stderr, "[tls] no TLS slot left for %s; it shares the eboot block\n", module->name);
+    else
+      fprintf(stderr, "[tls] %s tls_index %#llx -> module TLS slot %d\n", module->name,
+              (unsigned long long)ti_addr, slot);
+  }
+  if (num_known < 64) {
+    known[num_known].ti_addr = ti_addr;
+    known[num_known].slot = slot;
+    num_known++;
+  }
+  pthread_mutex_unlock(&lock);
+  return slot;
+}
+
 void shim___tls_get_addr(GuestContext *ctx) {
   uint64_t ti_addr = ctx->rdi;
   if (ti_addr) {
-    // tls_index {module, offset}. Only the eboot's static TLS block exists; it ends at fs base
-    // (variant II, recomp_tls_block_offset). Without a PT_TLS segment the offset stays fs-relative.
+    // tls_index {module, offset}. The eboot's static block ends at fs base (variant II,
+    // recomp_tls_block_offset). PRX modules (libSceFios2, libc) get their own block below it:
+    // resolving their offsets into the eboot's block made them share the game's first TLS
+    // variables (libSceFios2 offsets 0..0x38, libc 0x188), corrupting both.
     uint64_t offset = *(uint64_t *)(ctx->mem_base + ti_addr + 8);
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-    ctx->rax = ctx->fs_base - recomp_tls_block_offset(proc) + offset;
+    const uint64_t eboot_block = ctx->fs_base - recomp_tls_block_offset(proc);
+    const int slot = module_tls_slot(ti_addr);
+    if (slot >= 0 && offset < RECOMP_MODULE_TLS_SLOT_SIZE) {
+      const uint64_t eboot_start = ctx->fs_base - proc->static_tls_size;
+      ctx->rax = eboot_start - (uint64_t)(slot + 1) * RECOMP_MODULE_TLS_SLOT_SIZE + offset;
+    } else {
+      if (slot >= 0) {
+        static int warned;
+        if (!warned++)
+          fprintf(stderr, "[tls] module TLS offset %#llx exceeds its slot; using the eboot block\n",
+                  (unsigned long long)offset);
+      }
+      ctx->rax = eboot_block + offset;
+    }
   } else {
     ctx->rax = ctx->fs_base;
   }

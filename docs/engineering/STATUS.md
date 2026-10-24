@@ -1,6 +1,6 @@
 # Engineering status
 
-Updated: 2026-10-24. Primary branch: `luna/operation-spartan`. Current isolated runtime-integration candidate: `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `luna/gow3-runtime-integration`; commit `f856553` adds explicit EOP and external-flip callbacks to the host ABI and smoke tests. Game assets and run artifacts remain outside Git.
+Updated: 2026-10-24. Primary branch: `luna/operation-spartan`. Current isolated runtime-integration candidate: `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `luna/gow3-runtime-integration`; commit `03daf20` adds guest-VM-backed VideoOut flip labels and smoke coverage on top of `f856553`'s EOP/external-flip callbacks. Game assets and run artifacts remain outside Git.
 
 ## Current state
 

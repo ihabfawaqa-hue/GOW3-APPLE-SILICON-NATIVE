@@ -71,10 +71,11 @@ std::atomic_bool g_guest_memory_error_reported{};
 bool GetGuestMemoryApi(Gow3GpuGuestMemoryApi& api) {
     // The setter publishes this table once and rejects all replacements. An acquire
     // makes the immutable table visible without locking on every WAIT_REG_MEM poll,
-    // shader fetch and resource query. Keep the old path for controlled A/B runs.
+    // shader fetch and resource query (the GPU threads queued on this mutex in gameplay).
+    // GOW3_LOCK_GUEST_MEMORY_API=1 restores the lock for controlled A/B runs.
     static const bool lock_reads = [] {
         const char* value = std::getenv("GOW3_LOCK_GUEST_MEMORY_API");
-        return !value || value[0] != '0'; // keep production locked until gameplay gain is proven
+        return value && value[0] == '1';
     }();
     std::unique_lock lock{g_guest_memory_api_mutex, std::defer_lock};
     if (lock_reads) lock.lock();
@@ -242,6 +243,13 @@ static bool CopySparseSerial(const Gow3GpuGuestMemoryApi& api, VAddr source,
         ReportGuestMemoryError("validate sparse read", source, size);
         if (dest) std::memset(dest, 0, size);
         return false;
+    }
+    // A range inside one mapped extent (nearly every descriptor, user-data and shader read)
+    // reads without the VM lock: query_region takes it on each call, and the command thread,
+    // the draw preparation workers and the recording thread queued on it for most of a frame.
+    // The walk below handles ranges that cross unmapped or separately mapped regions.
+    if (size && api.read(api.user_context, source, dest, size)) {
+        return true;
     }
     bool success = true;
     while (size) {

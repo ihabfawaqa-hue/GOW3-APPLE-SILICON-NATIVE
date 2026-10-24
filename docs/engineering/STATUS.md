@@ -1,5 +1,15 @@
 # Engineering status
 
+## Structural bottleneck, part 1, 2026-10-24
+
+GPU-side threads no longer wait on guest-memory locks: lock-free whole-range reads, an
+8-entry extent cache and a per-thread shader-code cache. In dense gameplay windows
+(2,500–3,300 draws) the build runs 9.6–11.1 FPS, up from 6.4–9.5. The command thread now waits on the
+GPU 84–89% of the time, and the Metal trace shows the GPU busy 80%, up from 60%. The frame is GPU-bound at
+about 100 ms and does not shrink at 720p. Details, A/B toggles and a review of an external
+analysis: `STRUCTURAL_BOTTLENECK_20261024.md`. Next: per-pass GPU attribution, then load/store
+and encoder-split reductions; the post-movie indirect-jump crash at ~230 s blocks longer runs.
+
 ## Operation Spartan follow-up, 2026-10-24
 
 The handoff at `d352605` is verified, and diagnostics continue on

@@ -4,9 +4,12 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <vector>
 #include "common/assert.h"
 #include "common/types.h"
@@ -266,15 +269,67 @@ static std::optional<BinaryInfo> SearchBinaryInfo(std::span<const u32> code) {
 static Shader::ShaderParams GetParams(const auto& sh) {
     constexpr std::size_t max_shader_words = 0x4000;
     const VAddr base = sh.AddressValue();
+    auto* memory = Core::Memory::Instance();
+    // gow3: every stage of every draw comes here. Copying (and zero-filling) 64 KB to find the
+    // binary info took ~40% of the GPU command thread in gameplay. Each thread keeps the code
+    // it found per shader address and reuses it while the guest bytes up to the end of the
+    // binary info are unchanged: a copy of a few KB instead. GOW3_SHADER_CODE_CACHE=0 turns
+    // it off.
+    static const bool use_cache = [] {
+        const char* value = std::getenv("GOW3_SHADER_CODE_CACHE");
+        return !(value && value[0] == '0');
+    }();
+    struct Cached {
+        std::vector<u32> bytes; // guest words from the base through the binary info
+        u64 hash;
+        std::shared_ptr<std::vector<u32>> code;
+    };
+    thread_local std::unordered_map<VAddr, Cached> cache;
+    thread_local std::vector<u32> scratch;
+    if (use_cache) {
+        if (const auto it = cache.find(base); it != cache.end()) {
+            const auto& entry = it->second;
+            scratch.resize(entry.bytes.size());
+            if (memory->CopySparseMemory(base, reinterpret_cast<u8*>(scratch.data()),
+                                         scratch.size() * sizeof(u32)) &&
+                std::memcmp(scratch.data(), entry.bytes.data(),
+                            scratch.size() * sizeof(u32)) == 0) {
+                return Shader::ShaderParams{sh.user_data, std::span<const u32>{*entry.code},
+                                            entry.hash, base, entry.code};
+            }
+            cache.erase(it);
+        }
+    }
     auto code = std::make_shared<std::vector<u32>>(max_shader_words);
-    if (!Core::Memory::Instance()->CopySparseMemory(
-            base, reinterpret_cast<u8*>(code->data()), code->size() * sizeof(u32))) {
+    if (!memory->CopySparseMemory(base, reinterpret_cast<u8*>(code->data()),
+                                  code->size() * sizeof(u32))) {
         return {sh.user_data, {}, 0, base};
     }
     const auto bininfo = SearchBinaryInfo(*code);
     if (!bininfo || bininfo->length == 0 || bininfo->length % sizeof(u32) != 0 ||
         bininfo->length > code->size() * sizeof(u32)) {
         return {sh.user_data, {}, 0, base};
+    }
+    if (use_cache) {
+        // SearchBinaryInfo returns a copy: find where it was read from.
+        const auto* bytes = reinterpret_cast<const u8*>(code->data());
+        const u64 total = code->size() * sizeof(u32);
+        for (u64 offset = 0; offset + sizeof(BinaryInfo) <= total; offset += sizeof(u32)) {
+            if (std::memcmp(bytes + offset, &*bininfo, sizeof(BinaryInfo)) != 0) {
+                continue;
+            }
+            const u64 words = std::max<u64>(bininfo->length,
+                                            offset + sizeof(BinaryInfo) + sizeof(u32) - 1) /
+                              sizeof(u32);
+            auto stored = std::make_shared<std::vector<u32>>(
+                code->begin(), code->begin() + bininfo->length / sizeof(u32));
+            if (cache.size() >= 8192) {
+                cache.clear(); // addresses of shaders the game has since freed
+            }
+            cache[base] = Cached{std::vector<u32>(code->begin(), code->begin() + words),
+                                 bininfo->shader_hash, stored};
+            break;
+        }
     }
     code->resize(bininfo->length / sizeof(u32));
     const std::span<const u32> shader_code{*code};

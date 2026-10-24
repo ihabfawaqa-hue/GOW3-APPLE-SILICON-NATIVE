@@ -231,11 +231,15 @@ void recomp_vm_note_change(void) {
   atomic_fetch_add_explicit(&g_vm_generation, 1, memory_order_release);
 }
 
-// The committed extent this thread last validated for a GPU read.
+// The committed extents this thread last validated for GPU reads. GPU threads
+// alternate between a handful (shader code, descriptors, rings, constants): with
+// one entry nearly every read missed and took both VM locks.
+#define GPU_EXTENT_CACHE_SIZE 8
 static _Thread_local struct {
   GuestContext *process;
   uint64_t start, end, generation;
-} t_gpu_extent;
+} t_gpu_extents[GPU_EXTENT_CACHE_SIZE];
+static _Thread_local unsigned t_gpu_extent_next;
 
 bool recomp_guest_gpu_fast_range(GuestContext *ctx, uint64_t guest_addr,
                                  size_t size, uint8_t **host) {
@@ -246,27 +250,33 @@ bool recomp_guest_gpu_fast_range(GuestContext *ctx, uint64_t guest_addr,
   const uint64_t end = guest_addr + (uint64_t)size;
   const uint64_t generation =
       atomic_load_explicit(&g_vm_generation, memory_order_acquire);
-  if (t_gpu_extent.process != proc || t_gpu_extent.generation != generation ||
-      guest_addr < t_gpu_extent.start || end > t_gpu_extent.end) {
-    if (!memory_lock(proc))
-      return false;
-    const bool valid =
-        range_is_accessible_locked(proc, guest_addr, end, PROT_READ, false);
-    if (valid) {
-      for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
-        if (!e->is_free && guest_addr >= e->addr && end <= e->addr + e->size) {
-          t_gpu_extent.process = proc;
-          t_gpu_extent.start = e->addr;
-          t_gpu_extent.end = e->addr + e->size;
-          t_gpu_extent.generation = generation;
-          break;
-        }
+  for (unsigned i = 0; i < GPU_EXTENT_CACHE_SIZE; i++) {
+    if (t_gpu_extents[i].process == proc &&
+        t_gpu_extents[i].generation == generation &&
+        guest_addr >= t_gpu_extents[i].start && end <= t_gpu_extents[i].end) {
+      *host = proc->mem_base + guest_addr;
+      return true;
+    }
+  }
+  if (!memory_lock(proc))
+    return false;
+  const bool valid =
+      range_is_accessible_locked(proc, guest_addr, end, PROT_READ, false);
+  if (valid) {
+    for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
+      if (!e->is_free && guest_addr >= e->addr && end <= e->addr + e->size) {
+        const unsigned slot = t_gpu_extent_next++ % GPU_EXTENT_CACHE_SIZE;
+        t_gpu_extents[slot].process = proc;
+        t_gpu_extents[slot].start = e->addr;
+        t_gpu_extents[slot].end = e->addr + e->size;
+        t_gpu_extents[slot].generation = generation;
+        break;
       }
     }
-    memory_unlock(proc);
-    if (!valid)
-      return false;
   }
+  memory_unlock(proc);
+  if (!valid)
+    return false;
   *host = proc->mem_base + guest_addr;
   return true;
 }

@@ -71,12 +71,10 @@ static int guest_is_mapped(void *user_context, uint64_t address, uint64_t size) 
   // The pinned GPU source uses size=0 for point membership checks.
   if (!size)
     size = 1;
-  RecompGuestMemoryLease lease;
-  if (!recomp_guest_gpu_memory_acquire(ctx, address, (size_t)size, PROT_READ,
-                                      &lease))
-    return 0;
-  recomp_guest_memory_release(&lease);
-  return 1;
+  /* Same check as a GPU read lease, validated once per extent and VM generation
+     (texture binding asks this for every image of every draw). */
+  uint8_t *host;
+  return recomp_guest_gpu_fast_range(ctx, address, (size_t)size, &host) ? 1 : 0;
 }
 
 static int guest_host_to_guest(void *user_context, const void *host_pointer,

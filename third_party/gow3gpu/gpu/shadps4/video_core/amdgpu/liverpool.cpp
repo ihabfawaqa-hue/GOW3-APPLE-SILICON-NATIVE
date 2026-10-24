@@ -31,6 +31,7 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_wait_diagnostics.h"
 
 namespace AmdGpu {
 
@@ -1317,12 +1318,37 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 // Else the value may come from a fence that thread has yet to write: let it
                 // catch up before yielding to other queues.
+                if (wait_condition()) {
+                    break;
+                }
+                const auto wait_start = std::chrono::steady_clock::now();
+                bool drained = false;
                 while (!wait_condition()) {
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
+                        drained = true;
                         continue;
                     }
                     YIELD_GFX();
+                }
+                const u64 waited = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - wait_start).count();
+                Gow3Stats::regmem_wait_ns.fetch_add(waited, std::memory_order_relaxed);
+                Gow3Stats::regmem_waits.fetch_add(1, std::memory_order_relaxed);
+                // GOW3_PERF_DIAG: which labels the command thread waits on, and for how long.
+                static std::atomic<u32> long_waits_logged{0};
+                if (waited > 2'000'000 && Vulkan::WaitDiagnostics::Enabled() &&
+                    long_waits_logged.fetch_add(1, std::memory_order_relaxed) < 400) {
+                    std::printf("RegMem wait: %.2f ms on %s %#llx ref %#x mask %#x func %u%s\n",
+                                waited / 1e6,
+                                wait_reg_mem->mem_space.Value() ==
+                                        PM4CmdWaitRegMem::MemSpace::Register
+                                    ? "reg"
+                                    : "mem",
+                                static_cast<unsigned long long>(wait_reg_mem->AddressValue()),
+                                wait_reg_mem->ref, wait_reg_mem->mask,
+                                static_cast<u32>(wait_reg_mem->function.Value()),
+                                drained ? " (drained draw pipe)" : "");
                 }
                 break;
             }

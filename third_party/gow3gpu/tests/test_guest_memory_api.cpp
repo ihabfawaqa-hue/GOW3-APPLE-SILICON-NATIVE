@@ -306,11 +306,19 @@ int main() {
     assert(memory->CopySparseMemory(0x1000, copied.data(), copied.size()));
     assert((copied == std::array<std::uint8_t, 12>{
         0x40, 0x41, 0x42, 0x43, 0, 0, 0, 0, 0x48, 0x49, 0x4a, 0x4b}));
-    assert(fake.read_calls == 2);
+    // A range crossing an unmapped region: one whole-range read attempt, then one read per
+    // mapped region.
+    assert(fake.read_calls == 3);
     std::uint64_t sparse_hash{};
     assert(memory->HashSparseMemory(0x1000, copied.size(), 0, sparse_hash));
     assert(sparse_hash == XXH3_64bits(copied.data(), copied.size()));
-    assert(fake.read_calls == 4);
+    assert(fake.read_calls == 6);
+    // A range inside one mapped region is a single read (no region walk).
+    std::array<std::uint8_t, 8> contiguous{};
+    assert(memory->CopySparseMemory(0x1008, contiguous.data(), contiguous.size()));
+    assert(fake.read_calls == 7);
+    assert((contiguous == std::array<std::uint8_t, 8>{
+        0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f}));
 
     memory->GetAddressSpace().Protect(0x1008, 4096, Core::MemoryPermission::ReadWrite);
     assert(fake.protect_calls == 1);

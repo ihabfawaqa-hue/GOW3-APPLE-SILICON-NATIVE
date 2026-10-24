@@ -87,6 +87,10 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
 static void WaitGpuIdle() {
     HLE_TRACE;
     std::unique_lock lock{m_wait_idle};
+    if (submission_lock == 0) {
+        return;
+    }
+    Gow3Stats::WaitTimer timer{Gow3Stats::submit_lock_ns};
     cv_lock.wait(lock, [] { return submission_lock == 0; });
 }
 

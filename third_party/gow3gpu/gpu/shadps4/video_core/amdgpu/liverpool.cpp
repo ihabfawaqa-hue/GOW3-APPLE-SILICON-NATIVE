@@ -271,7 +271,12 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
             Gow3WriteLog::Note(guest_address, &data, num_bytes, Gow3WriteLog::Fence);
             return memory->TryWriteBacking(guest_address, &data, num_bytes);
         },
-        [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+        [] {
+            Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+            // The primary runtime owns guest equeues. Forward this notification only after
+            // SignalFence has published the label and its ordered host/GPU writes.
+            gow3gpu_notify_host_gnm_eop();
+        });
 }
 
 // gow3: end-of-pipe/-shader events run in order with the draws (Rasterizer::RunInOrder: on

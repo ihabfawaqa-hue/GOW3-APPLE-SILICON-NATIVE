@@ -5,6 +5,7 @@
 #include "ps4_kernel_sys.h"
 #include "../kernel/memory/ps4_direct_mem.h"
 #include "../kernel/vfs/ps4_vfs.h"
+#include "../modules/libSceGnmDriver/ps4_gnmdriver.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -14,6 +15,10 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+/* Keep the bridge independent of VideoOut's guest-facing equeue declarations. */
+void ps4_videoout_complete_external_flip(int32_t handle, int32_t buffer_index,
+                                         int64_t flip_arg);
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -323,6 +328,17 @@ static void host_request_restart(void *user_context) {
   atomic_store_explicit(&g_gow3gpu_restart_requested, 1, memory_order_release);
 }
 
+static void host_notify_gnm_eop(void *user_context) {
+  (void)user_context;
+  ps4_gnm_notify_eop();
+}
+
+static void host_notify_videoout_flip(void *user_context, int32_t handle,
+                                      int32_t buffer_index, int64_t flip_arg) {
+  (void)user_context;
+  ps4_videoout_complete_external_flip(handle, buffer_index, flip_arg);
+}
+
 int ps4_gow3gpu_install_runtime_apis(GuestContext *ctx,
                                      Ps4Gow3GpuSetGuestMemoryApi set_memory_api,
                                      Ps4Gow3GpuSetHostRuntimeApi set_host_api,
@@ -361,6 +377,8 @@ int ps4_gow3gpu_install_runtime_apis(GuestContext *ctx,
       .attach_host_thread = host_attach_thread,
       .detach_host_thread = host_detach_thread,
       .request_restart = host_request_restart,
+      .notify_gnm_eop = host_notify_gnm_eop,
+      .notify_videoout_flip = host_notify_videoout_flip,
   };
 
   atomic_store_explicit(&g_gow3gpu_fault_handler, fault_handler, memory_order_release);

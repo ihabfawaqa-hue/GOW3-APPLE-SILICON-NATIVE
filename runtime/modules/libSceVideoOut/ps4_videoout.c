@@ -326,6 +326,12 @@ static void complete_flip(void *arg) {
     free(arg);
 }
 
+void ps4_videoout_complete_external_flip(int32_t handle, int32_t bufferIndex,
+                                        int64_t flipArg) {
+    const PendingFlip completed = {handle, bufferIndex, flipArg};
+    finish_flip(&completed);
+}
+
 int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferIndex, uint32_t flipMode, int64_t flipArg) {
     static uint32_t s_last_mode = ~0u;
     if (__atomic_exchange_n(&s_last_mode, flipMode, __ATOMIC_RELAXED) != flipMode)

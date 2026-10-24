@@ -64,6 +64,8 @@ int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t startIndex, void * co
 int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t fliprate);
 int32_t sceVideoOutAddFlipEvent(OrbisKernelEqueue eq, int32_t handle, void *flipArg);
 int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferIndex, uint32_t flipMode, int64_t flipArg);
+/* Completion callback for an externally owned presenter (e.g. the integrated Vulkan backend). */
+void ps4_videoout_complete_external_flip(int32_t handle, int32_t bufferIndex, int64_t flipArg);
 int32_t sceVideoOutGetFlipStatus(int32_t handle, OrbisVideoOutFlipStatus *status);
 int32_t sceVideoOutGetResolutionStatus(int32_t handle, OrbisVideoOutResolutionStatus *status);
 int32_t sceVideoOutIsFlipPending(int32_t handle);

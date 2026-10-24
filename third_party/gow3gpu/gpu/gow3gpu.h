@@ -79,7 +79,7 @@ int gow3gpu_set_guest_memory_api(const Gow3GpuGuestMemoryApi *api);
  * returns this host thread's C-library errno slot; it is not the guest's PS4 errno
  * field. The host owns VFS path translation, clocks, thread bookkeeping and restart
  * policy. */
-#define GOW3GPU_HOST_RUNTIME_ABI_VERSION 1u
+#define GOW3GPU_HOST_RUNTIME_ABI_VERSION 2u
 typedef struct {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -93,11 +93,22 @@ typedef struct {
     int (*attach_host_thread)(void *user_context, const char *name);
     void (*detach_host_thread)(void *user_context);
     void (*request_restart)(void *user_context);
+    /* Notify the primary HLE after an imported Liverpool EOP has completed its
+     * ordered guest-memory writes. This wakes the primary runtime's equeue. */
+    void (*notify_gnm_eop)(void *user_context);
+    /* Notify the primary VideoOut state after the Vulkan presenter accepts the
+     * completed flip. The primary runtime owns guest equeue delivery. */
+    void (*notify_videoout_flip)(void *user_context, int32_t handle,
+                                 int32_t buffer_index, int64_t flip_arg);
 } Gow3GpuHostRuntimeApi;
 
 /* Install exactly once before gow3gpu_init. Every callback is required. */
 int gow3gpu_set_host_runtime_api(const Gow3GpuHostRuntimeApi *api);
 int gow3gpu_host_runtime_api_is_installed(void);
+/* Internal callbacks used by the pinned GPU core after ordered completion. */
+void gow3gpu_notify_host_gnm_eop(void);
+void gow3gpu_notify_host_videoout_flip(int32_t handle, int32_t buffer_index,
+                                       int64_t flip_arg);
 /* Registers kernel event queues (needed with or without graphics). */
 void gow3gpu_register_kernel(void);
 /* Creates window, Vulkan device, presenter and GPU command processor. */

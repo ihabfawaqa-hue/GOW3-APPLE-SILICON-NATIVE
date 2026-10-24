@@ -24,6 +24,8 @@ inline int TranslatePath(void*, const char*, char*, uint64_t) { return -1; }
 inline int AttachHostThread(void*, const char*) { return 0; }
 inline void DetachHostThread(void*) {}
 inline void RequestRestart(void*) {}
+inline void NotifyGnmEop(void*) {}
+inline void NotifyVideoOutFlip(void*, int32_t, int32_t, int64_t) {}
 
 inline Gow3GpuHostRuntimeApi MakeApi() {
     return Gow3GpuHostRuntimeApi{
@@ -38,6 +40,8 @@ inline Gow3GpuHostRuntimeApi MakeApi() {
         .attach_host_thread = AttachHostThread,
         .detach_host_thread = DetachHostThread,
         .request_restart = RequestRestart,
+        .notify_gnm_eop = NotifyGnmEop,
+        .notify_videoout_flip = NotifyVideoOutFlip,
     };
 }
 inline bool Install(void* library) {

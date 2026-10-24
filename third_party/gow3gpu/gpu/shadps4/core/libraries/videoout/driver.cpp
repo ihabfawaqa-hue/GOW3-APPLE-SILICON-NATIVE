@@ -23,6 +23,7 @@
 #include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "../../../../gow3gpu.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
 #include "core/libraries/videoout/videoout_error.h"
@@ -578,6 +579,10 @@ void VideoOutDriver::Flip(const Request& req) {
     }
     // save to prev buf index
     port->prev_index = req.index;
+
+    // The imported runtime owns the guest VideoOut/equeue state. Notify it only after this
+    // presenter has completed the flip and the candidate's own status is updated.
+    gow3gpu_notify_host_videoout_flip(1, req.index, req.flip_arg);
 }
 
 void VideoOutDriver::DrawBlankFrame() {

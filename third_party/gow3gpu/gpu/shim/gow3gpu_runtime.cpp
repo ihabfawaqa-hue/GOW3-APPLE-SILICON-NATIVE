@@ -40,7 +40,7 @@ int gow3gpu_set_host_runtime_api(const Gow3GpuHostRuntimeApi* api) {
         api->struct_size < sizeof(Gow3GpuHostRuntimeApi) || !api->errno_address ||
         !api->process_time_us || !api->process_time_counter || !api->tsc_frequency ||
         !api->translate_path || !api->attach_host_thread || !api->detach_host_thread ||
-        !api->request_restart) {
+        !api->request_restart || !api->notify_gnm_eop || !api->notify_videoout_flip) {
         return -1;
     }
     std::scoped_lock lock{g_host_runtime_mutex};
@@ -53,6 +53,19 @@ int gow3gpu_set_host_runtime_api(const Gow3GpuHostRuntimeApi* api) {
 int gow3gpu_host_runtime_api_is_installed(void) {
     std::scoped_lock lock{g_host_runtime_mutex};
     return g_host_runtime_api_installed ? 1 : 0;
+}
+
+void gow3gpu_notify_host_gnm_eop(void) {
+    Gow3GpuHostRuntimeApi api{};
+    if (!GetHostRuntimeApi(api)) MissingRequiredHostCallback("notify_gnm_eop");
+    api.notify_gnm_eop(api.user_context);
+}
+
+void gow3gpu_notify_host_videoout_flip(int32_t handle, int32_t buffer_index,
+                                       int64_t flip_arg) {
+    Gow3GpuHostRuntimeApi api{};
+    if (!GetHostRuntimeApi(api)) MissingRequiredHostCallback("notify_videoout_flip");
+    api.notify_videoout_flip(api.user_context, handle, buffer_index, flip_arg);
 }
 
 int32_t* runtime_errno(void) {

@@ -13,6 +13,11 @@ struct TestContext {
     unsigned attach_count{};
     unsigned detach_count{};
     unsigned restart_count{};
+    unsigned eop_count{};
+    unsigned flip_count{};
+    int32_t flip_handle{};
+    int32_t flip_buffer{};
+    int64_t flip_arg{};
     char attached_name[64]{};
 };
 
@@ -23,6 +28,8 @@ using TranslatePath = int (*)(const char*, char*, size_t);
 using AttachHostThread = void (*)(const char*);
 using DetachHostThread = void (*)();
 using RequestRestart = void (*)();
+using NotifyHostEop = void (*)();
+using NotifyHostFlip = void (*)(int32_t, int32_t, int64_t);
 using HandleFault = int (*)(void*, void*);
 using RecoverySelfTest = int (*)();
 
@@ -50,6 +57,14 @@ int Attach(void* context, const char* name) {
 }
 void Detach(void* context) { ++static_cast<TestContext*>(context)->detach_count; }
 void Restart(void* context) { ++static_cast<TestContext*>(context)->restart_count; }
+void NotifyEop(void* context) { ++static_cast<TestContext*>(context)->eop_count; }
+void NotifyFlip(void* context, int32_t handle, int32_t buffer, int64_t arg) {
+    auto* test = static_cast<TestContext*>(context);
+    ++test->flip_count;
+    test->flip_handle = handle;
+    test->flip_buffer = buffer;
+    test->flip_arg = arg;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -72,13 +87,15 @@ int main(int argc, char** argv) {
     const auto attach = Load<AttachHostThread>(library, "runtime_thread_attach_host");
     const auto detach = Load<DetachHostThread>(library, "runtime_thread_detach_host");
     const auto restart = Load<RequestRestart>(library, "runtime_restart");
+    const auto notify_eop = Load<NotifyHostEop>(library, "gow3gpu_notify_host_gnm_eop");
+    const auto notify_flip = Load<NotifyHostFlip>(library, "gow3gpu_notify_host_videoout_flip");
     const auto handle_fault = Load<HandleFault>(library, "gow3gpu_handle_fault");
     const auto recovery_self_test = Load<RecoverySelfTest>(
         library, "gow3gpu_runtime_fault_recovery_self_test");
     auto* disabled_optimizations = static_cast<uint64_t*>(dlsym(library, "runtime_disabled_optimizations"));
     if (!set_api || !errno_address || !process_time_us || !process_time_counter ||
         !tsc_frequency || !translate || !attach || !detach || !restart || !handle_fault ||
-        !disabled_optimizations || !recovery_self_test) {
+        !disabled_optimizations || !recovery_self_test || !notify_eop || !notify_flip) {
         std::fprintf(stderr, "required host-runtime bridge symbol missing\n");
         return 1;
     }
@@ -100,6 +117,8 @@ int main(int argc, char** argv) {
         .attach_host_thread = Attach,
         .detach_host_thread = Detach,
         .request_restart = Restart,
+        .notify_gnm_eop = NotifyEop,
+        .notify_videoout_flip = NotifyFlip,
     };
     auto invalid_api = api;
     invalid_api.abi_version++;
@@ -121,9 +140,14 @@ int main(int argc, char** argv) {
     attach("smoke-thread");
     detach();
     restart();
+    notify_eop();
+    notify_flip(3, 7, 0x12345678);
     if (context.error != 77 || context.attach_count != 1 || context.detach_count != 1 ||
-        context.restart_count != 1 || std::strcmp(context.attached_name, "smoke-thread") != 0) {
-        std::fprintf(stderr, "host thread or restart callback forwarding failed\n");
+        context.restart_count != 1 || context.eop_count != 1 || context.flip_count != 1 ||
+        context.flip_handle != 3 || context.flip_buffer != 7 ||
+        context.flip_arg != 0x12345678 ||
+        std::strcmp(context.attached_name, "smoke-thread") != 0) {
+        std::fprintf(stderr, "host thread, restart, or graphics completion forwarding failed\n");
         return 1;
     }
 
@@ -135,6 +159,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("{\"host_runtime_api\":\"PASS\",\"errno_time_vfs_threads_restart\":\"PASS\",\"fault_recovery\":\"PASS\",\"verdict\":\"PASS\"}\n");
+    std::printf("{\"host_runtime_api\":\"PASS\",\"errno_time_vfs_threads_restart\":\"PASS\",\"eop_and_flip_forwarding\":\"PASS\",\"fault_recovery\":\"PASS\",\"verdict\":\"PASS\"}\n");
     return 0;
 }

@@ -34,6 +34,21 @@ static const uint32_t *g_submitted_dcb;
 static const uint32_t *g_submitted_ccb;
 static int g_submit_calls;
 static int g_submit_done_calls;
+static int g_primary_eop_notifications;
+static int g_primary_flip_notifications;
+static int32_t g_flip_handle;
+static int32_t g_flip_buffer;
+static int64_t g_flip_arg;
+
+void ps4_gnm_notify_eop(void) { g_primary_eop_notifications++; }
+
+void ps4_videoout_complete_external_flip(int32_t handle, int32_t buffer_index,
+                                         int64_t flip_arg) {
+  g_primary_flip_notifications++;
+  g_flip_handle = handle;
+  g_flip_buffer = buffer_index;
+  g_flip_arg = flip_arg;
+}
 
 uint64_t sceKernelGetProcessTime(void) { return 123456; }
 uint64_t sceKernelGetProcessTimeCounter(void) { return 654321; }
@@ -253,6 +268,13 @@ int main(void) {
       g_host_api.process_time_counter(&ctx) != 654321 ||
       g_host_api.tsc_frequency(&ctx) != 2130000000ULL)
     return fail("host errno and clocks");
+  if (!g_host_api.notify_gnm_eop || !g_host_api.notify_videoout_flip)
+    return fail("host completion callbacks installed");
+  g_host_api.notify_gnm_eop(g_host_api.user_context);
+  g_host_api.notify_videoout_flip(g_host_api.user_context, 1, 2, 0x3456);
+  if (g_primary_eop_notifications != 1 || g_primary_flip_notifications != 1 ||
+      g_flip_handle != 1 || g_flip_buffer != 2 || g_flip_arg != 0x3456)
+    return fail("completion callbacks wake the primary runtime with exact flip state");
   char path[64] = {0};
   if (g_host_api.translate_path(&ctx, "/app0/test", path, sizeof(path)) != 0 ||
       strcmp(path, "/tmp/mock-gow3-path") != 0)
@@ -305,6 +327,6 @@ int main(void) {
 
   pthread_mutex_destroy(&ctx.vm_mutex);
   munmap(memory, memory_size);
-  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"reentrant_guest_memory_lease\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
+  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"reentrant_guest_memory_lease\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"eop_and_flip_forwarding\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
   return 0;
 }

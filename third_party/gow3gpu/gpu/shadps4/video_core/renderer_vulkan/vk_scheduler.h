@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <cstdlib>
+#include <string>
+
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -698,6 +701,17 @@ public:
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
 
+    /// gow3: GOW3_METAL_PASS_LABELS=1: name for the next render pass. Applied as the command
+    /// buffer's debug name, which KosmicKrisp copies onto each Metal encoder it creates, so
+    /// Metal System Trace intervals can be matched to guest passes.
+    void SetPassLabel(std::string label) {
+        pass_label = std::move(label);
+    }
+    static bool PassLabelsEnabled() {
+        static const bool enabled = std::getenv("GOW3_METAL_PASS_LABELS") != nullptr;
+        return enabled;
+    }
+
     /// Ends current rendering scope.
     void EndRendering();
 
@@ -889,6 +903,7 @@ private:
 
 private:
     const Instance& instance;
+    std::string pass_label;
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;

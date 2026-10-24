@@ -96,6 +96,15 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
                                          vk::ClearDepthStencilValue{.stencil = db.clear_value[1]}},
     };
 
+    if (PassLabelsEnabled() && !pass_label.empty()) {
+        if (!recording_threaded) {
+            SetObjectName(instance.GetDevice(), current_cmdbuf, pass_label);
+        } else {
+            Record([device = instance.GetDevice(), label = pass_label](vk::CommandBuffer cmdbuf) {
+                SetObjectName(device, cmdbuf, label);
+            });
+        }
+    }
     const vk::RenderingInfo rendering_info = {
         .renderArea =
             {

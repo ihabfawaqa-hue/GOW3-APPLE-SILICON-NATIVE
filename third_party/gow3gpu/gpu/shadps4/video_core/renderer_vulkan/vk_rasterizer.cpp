@@ -3298,6 +3298,25 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
         DumpPassTargets(state.num_color_attachments);
     }
+    if (Scheduler::PassLabelsEnabled()) {
+        std::string label = "pass";
+        const auto describe = [&](const VideoCore::ImageId id) {
+            const auto& info = texture_cache.GetImage(id).info;
+            label += fmt::format(" {:x}:{}x{}s{}:{}", info.guest_address, info.size.width,
+                                 info.size.height, info.num_samples,
+                                 vk::to_string(info.pixel_format));
+        };
+        for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
+            if (cb_descs[cb].first) {
+                describe(cb_descs[cb].first);
+            }
+        }
+        if (db_desc.first) {
+            label += " depth";
+            describe(db_desc.first);
+        }
+        scheduler.SetPassLabel(std::move(label));
+    }
     // gow3: object motion vector attachment of G-buffer pipelines.
     if (key.motion_vectors) {
         object_motion->Attach(state, state.width, state.height);

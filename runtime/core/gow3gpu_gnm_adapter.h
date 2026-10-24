@@ -16,6 +16,21 @@ typedef int32_t (*Ps4Gow3GpuSubmitCommandBuffersFn)(
 typedef int32_t (*Ps4Gow3GpuSubmitDoneFn)(void);
 typedef int32_t (*Ps4Gow3GpuWaitIdleFn)(void);
 
+/* Install once after the candidate GPU and runtime callback tables are ready.
+ * This opt-in route makes the pinned candidate the sole Liverpool PM4 submit
+ * owner; guest command bytes are copied until its submit-done drain completes. */
+int ps4_gow3gpu_install_submission_backend(
+    const Gow3GpuGuestMemoryApi *memory_api,
+    Ps4Gow3GpuSubmitCommandBuffersFn submit,
+    Ps4Gow3GpuSubmitDoneFn submit_done,
+    Ps4Gow3GpuWaitIdleFn wait_idle);
+int ps4_gow3gpu_submission_backend_active(void);
+int32_t ps4_gow3gpu_submit_guest_arrays(
+    GuestContext *ctx, uint32_t count, const uint64_t *dcb_guest_addresses,
+    const uint32_t *dcb_sizes, const uint64_t *ccb_guest_addresses,
+    const uint32_t *ccb_sizes);
+int32_t ps4_gow3gpu_backend_submit_done(void);
+
 /* Marshal the real sceGnmSubmitCommandBuffers GuestContext register ABI into
  * the pinned GPU library ABI. Guest command bytes are copied into host-owned
  * storage and retained until submit-done confirms the candidate has drained. */

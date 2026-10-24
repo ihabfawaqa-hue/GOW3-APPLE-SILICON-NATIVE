@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -86,10 +87,39 @@ static bool IsTypedBufferLoad(const Gcn::GcnInst& inst) {
            inst.opcode == Opcode::TBUFFER_LOAD_FORMAT_XYZW;
 }
 
-const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base) {
-    const u32* code;
-    std::memcpy(&code, &info.UserData()[sgpr_base], sizeof(code));
-    return code;
+bool CopyFetchShaderCode(const Info& info, u32 sgpr_base, std::vector<u32>& code,
+                         VAddr* guest_address, size_t* valid_bytes) {
+    constexpr u64 max_fetch_shader_bytes = 16 * 1024;
+    const auto user_data = info.UserData();
+    if (sgpr_base > user_data.size() || user_data.size() - sgpr_base < 2) {
+        return false;
+    }
+
+    VAddr address{};
+    std::memcpy(&address, user_data.data() + sgpr_base, sizeof(address));
+    address &= 0xFFFFFFFFFFFFULL;
+    const u64 available = Core::Memory::Instance()->ClampRangeSize(address,
+                                                                    max_fetch_shader_bytes);
+    const u64 bytes = std::min(available, max_fetch_shader_bytes) & ~u64{3};
+    if (bytes < sizeof(u32)) {
+        return false;
+    }
+
+    // Some GCN encodings read one or two trailing dwords. Keep zeroed guard words beyond
+    // the guest range while the decoder is bounded by valid_bytes.
+    code.assign(bytes / sizeof(u32) + 4, 0);
+    if (!Core::Memory::Instance()->CopySparseMemory(
+            address, reinterpret_cast<u8*>(code.data()), bytes)) {
+        code.clear();
+        return false;
+    }
+    if (guest_address) {
+        *guest_address = address;
+    }
+    if (valid_bytes) {
+        *valid_bytes = static_cast<size_t>(bytes);
+    }
+    return true;
 }
 
 std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
@@ -100,7 +130,16 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         return std::nullopt;
     }
 
-    const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
+    std::vector<u32> code_storage;
+    VAddr code_address{};
+    size_t code_bytes{};
+    if (!CopyFetchShaderCode(info, info.fetch_shader_sgpr_base, code_storage, &code_address,
+                             &code_bytes)) {
+        LOG_ERROR(Render_Recompiler, "Fetch shader guest range is unavailable for shader {:#018x}",
+                  info.pgm_hash);
+        return std::nullopt;
+    }
+    const auto* code = code_storage.data();
 
     // gow3: the pipeline cache parses the fetch shader on every draw. Results are cached
     // per thread by code address and revalidated against a copy of the code, which is
@@ -109,15 +148,16 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         std::vector<u32> code;
         FetchShaderData data;
     };
-    thread_local std::unordered_map<const u32*, CachedParse> cache;
-    if (const auto it = cache.find(code);
+    thread_local std::unordered_map<VAddr, CachedParse> cache;
+    if (const auto it = cache.find(code_address);
         !Gow3Toggle::Disabled(Gow3Toggle::FetchShaderCache) && it != cache.end() &&
+        it->second.code.size() <= code_storage.size() &&
         std::memcmp(code, it->second.code.data(), it->second.code.size() * sizeof(u32)) == 0) {
         return it->second.data;
     }
 
     FetchShaderData data{};
-    GcnCodeSlice code_slice(code, code + std::numeric_limits<u32>::max());
+    GcnCodeSlice code_slice(code, code + code_bytes / sizeof(u32));
     GcnDecodeContext decoder;
 
     struct VsharpLoad {
@@ -127,11 +167,13 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
     std::array<VsharpLoad, 104> loads{};
 
     u32 semantic_index = 0;
+    bool terminated = false;
     while (!code_slice.atEnd()) {
         const auto inst = decoder.decodeInstruction(code_slice);
         data.size += inst.length;
 
         if (inst.opcode == Opcode::S_SETPC_B64) {
+            terminated = true;
             break;
         }
 
@@ -173,10 +215,18 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         }
     }
 
+    if (!terminated) {
+        LOG_ERROR(Render_Recompiler,
+                  "Fetch shader at guest address {:#x} has no S_SETPC_B64 within {} bytes",
+                  code_address, code_storage.size() * sizeof(u32));
+        return std::nullopt;
+    }
+
     if (cache.size() >= 4096) {
         cache.clear();
     }
-    cache[code] = CachedParse{std::vector<u32>(code, code_slice.position()), data};
+    code_storage.resize(data.size / sizeof(u32) + 4, 0);
+    cache[code_address] = CachedParse{std::move(code_storage), data};
     return data;
 }
 

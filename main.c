@@ -1,4 +1,5 @@
 #include "recomp_runtime.h"
+#include "gow3gpu_runtime_loader.h"
 #include "ps4_vfs.h"
 #include <unistd.h>
 #ifdef __APPLE__
@@ -56,6 +57,11 @@ static void *guest_main(void *p) {
     recomp_init_tls(ctx, 0x3c0040ULL, 0x0ULL, 0x2740ULL, 0x10ULL);
 
     recomp_setup_entry_args(ctx, argc, argv, 0x144070ULL);
+
+    if (ps4_gow3gpu_start_requested_backend(ctx) != 0) {
+        fprintf(stderr, "[ps4-recomp] Requested GoW3 Vulkan backend failed to initialize\n");
+        exit(1);
+    }
 
     printf("[ps4-recomp] Executing %s (0x%x) via ARM64 assembly...\n", "_start", (unsigned int)0x144070ULL);
     extern void fn_0x144070(void);

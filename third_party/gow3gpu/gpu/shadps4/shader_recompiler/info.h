@@ -126,6 +126,16 @@ struct Info : InfoPersistent {
     std::shared_ptr<const std::vector<u32>> code_storage;
     std::vector<u32> flattened_ud_buf;
     PersistentSrtInfo srt_info;
+    // ARM64 cannot execute the x86-64 SRT walker serialized by upstream. These direct
+    // user-data reads are resolved through the guest-memory interface when the flat buffer
+    // is refreshed for a draw.
+    struct FlatUserDataRead {
+        u32 sgpr_base;
+        u32 dword_offset;
+        u16 flat_offset;
+    };
+    std::vector<FlatUserDataRead> flat_user_data_reads;
+    bool flat_user_data_unresolved{};
 
     AttributeFlags loads{};
     AttributeFlags stores{};
@@ -265,6 +275,12 @@ struct Info : InfoPersistent {
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+        }
+        for (const auto& read : flat_user_data_reads) {
+            if (read.flat_offset < flattened_ud_buf.size()) {
+                flattened_ud_buf[read.flat_offset] = ReadUdReg<u32>(read.sgpr_base,
+                                                                     read.dword_offset);
+            }
         }
     }
 

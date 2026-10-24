@@ -19,7 +19,17 @@ Local integration patches (GPL-2.0-or-later files remain under the upstream lice
   - Local GoW3 shader, image-alias, depth/stencil, blend, presenter, and synchronization
     changes are marked with `gow3:` in source. See the associated regression tests under
     `tests/` and runtime adapter probes under `scripts/lab/probes/gow3gpu/`.
+  - ARM64 SRT lowering replaces the upstream x86-64 JIT for direct, immediate-index
+    user-data reads. It resolves those reads through the guest-memory API, records
+    unsupported nested/dynamic forms, and bumps pipeline/shader metadata versions. This
+    path is intentionally incomplete until nested/dynamic SRT handling is implemented.
+  - Fetch-shader code is copied from the guest VA through `Core::Memory::CopySparseMemory`
+    into a bounded 16 KiB snapshot. Parsing requires an in-range `S_SETPC_B64` terminator;
+    guest VAs are never cast to host pointers.
+  - Vulkan instance setup explicitly reports/requires the sparse binding and sparse buffer
+    residency features used by `BufferCache`. KosmicKrisp and MoltenVK on the M2 currently
+    lack both, so the candidate route fails before claiming GPU draw support.
 
-Build target: native Apple Silicon arm64 macOS, CMake/Ninja, C++20 video core, Vulkan
+Build target: native Apple Silicon arm64 macOS, CMake/Ninja, C++23 video core, Vulkan
 loader supplied by the selected host driver. An arm64 dylib build is not evidence that
 the host Vulkan implementation passes the renderer feature/workload probe.

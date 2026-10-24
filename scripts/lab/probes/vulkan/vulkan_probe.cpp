@@ -46,6 +46,7 @@ struct Results {
     bool source_enables_portability_subset{};
     bool source_required_extensions_present{};
     bool source_required_features_present{};
+    bool source_buffer_cache_features_present{};
     bool source_optional_feature_requests_valid{true};
     bool device_created{};
     bool source_required_device_create_succeeded{};
@@ -171,6 +172,8 @@ void WriteJson(const Results& r, const std::string& output_path) {
         << Bool(r.source_required_extensions_present)
         << ",\n  \"source_required_features_present\": "
         << Bool(r.source_required_features_present)
+        << ",\n  \"source_buffer_cache_features_present\": "
+        << Bool(r.source_buffer_cache_features_present)
         << ",\n  \"source_optional_feature_requests_valid\": "
         << Bool(r.source_optional_feature_requests_valid)
         << ",\n  \"device_created\": " << Bool(r.device_created)
@@ -1193,6 +1196,8 @@ int main(int argc, char** argv) {
         if (results.extensions[VK_KHR_PIPELINE_BINARY_EXTENSION_NAME]) { *tail = &pipeline_binary; tail = &pipeline_binary.pNext; }
         vkGetPhysicalDeviceFeatures2(physical, &core);
         results.features["core_robustBufferAccess"] = core.features.robustBufferAccess;
+        results.features["core_sparseBinding"] = core.features.sparseBinding;
+        results.features["core_sparseResidencyBuffer"] = core.features.sparseResidencyBuffer;
         results.features["robustBufferAccess2"] = robustness.robustBufferAccess2;
         results.features["robustImageAccess2"] = robustness.robustImageAccess2;
         results.features["nullDescriptor"] = robustness.nullDescriptor;
@@ -1207,12 +1212,15 @@ int main(int argc, char** argv) {
         results.features["core12_shaderInt8"] = f12.shaderInt8;
         results.features["core12_scalarBlockLayout"] = f12.scalarBlockLayout;
         results.features["core12_timelineSemaphore"] = f12.timelineSemaphore;
+        results.features["core12_bufferDeviceAddress"] = f12.bufferDeviceAddress;
         results.features["core13_synchronization2"] = f13.synchronization2;
         results.features["core13_dynamicRendering"] = f13.dynamicRendering;
         results.features["pipelineBinaries"] = pipeline_binary.pipelineBinaries;
+        results.source_buffer_cache_features_present = core.features.sparseBinding &&
+            core.features.sparseResidencyBuffer && f12.bufferDeviceAddress;
         results.source_required_features_present = robustness.robustBufferAccess2 &&
             robustness.robustImageAccess2 && robustness.nullDescriptor &&
-            divisor.vertexAttributeInstanceRateDivisor;
+            divisor.vertexAttributeInstanceRateDivisor && results.source_buffer_cache_features_present;
 
         // The pinned source unconditionally sets these extension feature bits to true
         // whenever their extension name is present, without querying the bit first.
@@ -1354,10 +1362,19 @@ int main(int argc, char** argv) {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES,
                 .vertexAttributeInstanceRateDivisor = VK_TRUE,
             };
+            VkPhysicalDeviceVulkan12Features source_v12{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+                .bufferDeviceAddress = VK_TRUE,
+            };
+            source_divisor.pNext = &source_v12;
             source_robustness.pNext = &source_divisor;
             VkPhysicalDeviceFeatures2 source_features{
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
                 .pNext = &source_robustness,
+                .features{
+                    .sparseBinding = VK_TRUE,
+                    .sparseResidencyBuffer = VK_TRUE,
+                },
             };
             std::vector<const char*> source_extensions;
             for (const char* name : required_exts) {

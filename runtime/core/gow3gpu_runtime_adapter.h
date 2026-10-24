@@ -20,6 +20,10 @@ int ps4_gow3gpu_install_runtime_apis(GuestContext *ctx,
                                      Ps4Gow3GpuSetHostRuntimeApi set_host_api,
                                      Ps4Gow3GpuFaultHandler fault_handler);
 
+/* Stable callback table installed into the candidate, shared with the GNM
+ * adapter for checked guest-array and PM4 reads. Available after installation. */
+const Gow3GpuGuestMemoryApi *ps4_gow3gpu_runtime_memory_api(void);
+
 /* The runtime signal handler calls this before producing a fatal report. */
 int ps4_gow3gpu_dispatch_fault(void *ucontext, void *address);
 

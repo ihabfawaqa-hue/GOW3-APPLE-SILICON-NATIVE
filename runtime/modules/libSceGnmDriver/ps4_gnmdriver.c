@@ -12,6 +12,7 @@
 #include "ps4_videoout.h"
 #include "ps4_gnm_metal.h"
 #include "ps4_equeue.h"
+#include "../../core/gow3gpu_gnm_adapter.h"
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -893,6 +894,12 @@ static int32_t ps4_gnm_process_command_buffers(GuestContext *ctx, uint32_t count
                                                const uint64_t *dcb_gpu_addrs, const uint32_t *dcb_sizes_in_bytes,
                                                const uint64_t *ccb_gpu_addrs, const uint32_t *ccb_sizes_in_bytes) {
     if (!ctx || count == 0) return ORBIS_GNM_OK;
+    if (ps4_gow3gpu_submission_backend_active()) {
+        return ps4_gow3gpu_submit_guest_arrays(ctx, count, dcb_gpu_addrs,
+                                              dcb_sizes_in_bytes,
+                                              ccb_gpu_addrs,
+                                              ccb_sizes_in_bytes);
+    }
     return ps4_gnm_metal_process_command_buffers(ctx, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes);
 }
 
@@ -986,6 +993,14 @@ int32_t sceGnmSubmitDone(void) {
     if (cur <= 5 || (cur % 120) == 0) {
         fprintf(stderr, "[gnm] sceGnmSubmitDone: frame %llu (flips=%llu)\n",
                 (unsigned long long)cur, (unsigned long long)g_ps4_videoout_flip_count);
+    }
+    if (ps4_gow3gpu_submission_backend_active()) {
+        const int32_t result = ps4_gow3gpu_backend_submit_done();
+        if (result != ORBIS_GNM_OK) {
+            fprintf(stderr, "[gow3gpu-route] candidate submit-done failed: 0x%x\n",
+                    (unsigned)result);
+            return result;
+        }
     }
     return ORBIS_GNM_OK;
 }

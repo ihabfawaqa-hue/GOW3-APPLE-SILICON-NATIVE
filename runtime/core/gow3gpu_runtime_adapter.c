@@ -45,6 +45,7 @@ static Gow3GpuMapHookState g_gow3gpu_hooks;
 static _Atomic(Ps4Gow3GpuFaultHandler) g_gow3gpu_fault_handler;
 static atomic_int g_gow3gpu_restart_requested;
 static atomic_int g_gow3gpu_runtime_api_installed;
+static Gow3GpuGuestMemoryApi g_gow3gpu_memory_api;
 static __thread char g_gow3gpu_saved_thread_name[64];
 static __thread int g_gow3gpu_saved_thread_name_valid;
 
@@ -403,7 +404,7 @@ int ps4_gow3gpu_install_runtime_apis(GuestContext *ctx,
   if (!atomic_compare_exchange_strong(&g_gow3gpu_runtime_api_installed, &expected, -1))
     return -2;
 
-  Gow3GpuGuestMemoryApi memory_api = {
+  g_gow3gpu_memory_api = (Gow3GpuGuestMemoryApi){
       .abi_version = GOW3GPU_GUEST_MEMORY_ABI_VERSION,
       .struct_size = sizeof(Gow3GpuGuestMemoryApi),
       .user_context = proc,
@@ -437,7 +438,7 @@ int ps4_gow3gpu_install_runtime_apis(GuestContext *ctx,
   };
 
   atomic_store_explicit(&g_gow3gpu_fault_handler, fault_handler, memory_order_release);
-  if (set_memory_api(&memory_api) != 0 || set_host_api(&host_api) != 0) {
+  if (set_memory_api(&g_gow3gpu_memory_api) != 0 || set_host_api(&host_api) != 0) {
     atomic_store_explicit(&g_gow3gpu_fault_handler, NULL, memory_order_release);
     /* One side may already have accepted its one-shot API, so this process cannot retry
      * installation safely without a library teardown/reset contract. */
@@ -446,6 +447,13 @@ int ps4_gow3gpu_install_runtime_apis(GuestContext *ctx,
   }
   atomic_store_explicit(&g_gow3gpu_runtime_api_installed, 1, memory_order_release);
   return 0;
+}
+
+const Gow3GpuGuestMemoryApi *ps4_gow3gpu_runtime_memory_api(void) {
+  return atomic_load_explicit(&g_gow3gpu_runtime_api_installed,
+                              memory_order_acquire) == 1
+             ? &g_gow3gpu_memory_api
+             : NULL;
 }
 
 int ps4_gow3gpu_dispatch_fault(void *ucontext, void *address) {

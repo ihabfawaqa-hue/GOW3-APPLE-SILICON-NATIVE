@@ -425,8 +425,29 @@ int main(void) {
       g_submit_calls != 1)
     return fail("reject unmapped GNM address array");
 
+  /* Exercise the common GNM processing seam, which receives host views of
+   * guest address/size arrays from the submit and submit-and-flip variants. */
+  memcpy(memory + dcb_guest_va, nop_packet, sizeof(nop_packet));
+  memcpy(memory + ccb_guest_va, nop_packet, sizeof(nop_packet));
+  if (ps4_gow3gpu_install_submission_backend(
+          &g_memory_api, fake_submit, fake_submit_done, fake_wait_idle) != 0 ||
+      !ps4_gow3gpu_submission_backend_active())
+    return fail("install candidate submission owner");
+  if (ps4_gow3gpu_submit_guest_arrays(
+          &ctx, 1, (const uint64_t *)(memory + 0x30000),
+          (const uint32_t *)(memory + 0x30020),
+          (const uint64_t *)(memory + 0x30030),
+          (const uint32_t *)(memory + 0x30040)) != 0 ||
+      g_submit_calls != 2 || ps4_gow3gpu_retained_command_bytes() != 16 ||
+      g_submitted_dcb[0] != 0xc0001000u ||
+      g_submitted_ccb[0] != 0xc0001000u)
+    return fail("candidate route copies guest arrays and PM4");
+  if (ps4_gow3gpu_backend_submit_done() != 0 || g_submit_done_calls != 2 ||
+      ps4_gow3gpu_retained_command_bytes() != 0)
+    return fail("candidate route retires PM4 at submit-done");
+
   pthread_mutex_destroy(&ctx.vm_mutex);
   munmap(memory, memory_size);
-  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"reentrant_guest_memory_lease\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"guest_backed_videoout_labels\":\"PASS\",\"eop_and_flip_forwarding\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
+  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"reentrant_guest_memory_lease\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"guest_backed_videoout_labels\":\"PASS\",\"eop_and_flip_forwarding\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"candidate_primary_gnm_route\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
   return 0;
 }

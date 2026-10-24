@@ -8,6 +8,7 @@
 #include <cstring>
 #include <mutex>
 #include <ranges>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include "gow3_threads.h"
@@ -495,6 +496,11 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
         // gow3: the GPU thread waits until all guest reads and specialization are captured.
         build->ir.emplace(Shader::TranslateProgram(build->code, *build->pools, build->info,
                                                    build->runtime, profile));
+        if (build->info.flat_user_data_unresolved) {
+            throw std::runtime_error(fmt::format(
+                "unsupported ARM64 nested/dynamic SRT read in {} shader {:#x}",
+                build->info.hw_stage, build->info.pgm_hash));
+        }
         build->spec = Shader::StageSpecialization(build->info, build->runtime, profile, binding);
         build->fetch.Capture(build->info);
         return true;

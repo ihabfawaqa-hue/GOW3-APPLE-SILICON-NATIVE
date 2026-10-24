@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <vector>
 #include "common/types.h"
@@ -76,7 +77,8 @@ private:
     const FetchShaderSnapshot* previous;
 };
 
-const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
+bool CopyFetchShaderCode(const Info& info, u32 sgpr_base, std::vector<u32>& code,
+                         VAddr* guest_address = nullptr, size_t* valid_bytes = nullptr);
 
 std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info);
 

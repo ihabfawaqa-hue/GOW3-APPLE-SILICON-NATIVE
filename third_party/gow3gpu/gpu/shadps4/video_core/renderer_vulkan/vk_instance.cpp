@@ -273,6 +273,14 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePipelineBinaryFeaturesKHR,
         vk::PhysicalDeviceMaintenance5FeaturesKHR>();
     features = feature_chain.get().features;
+    LOG_INFO(Render_Vulkan,
+             "Buffer-cache requirements: sparseBinding={}, sparseResidencyBuffer={}, "
+             "bufferDeviceAddress={}",
+             bool(features.sparseBinding), bool(features.sparseResidencyBuffer),
+             bool(feature_chain.get<vk::PhysicalDeviceVulkan12Features>().bufferDeviceAddress));
+    ASSERT_MSG(features.sparseBinding && features.sparseResidencyBuffer,
+               "The pinned shadPS4 buffer cache requires Vulkan sparseBinding and "
+               "sparseResidencyBuffer; non-sparse guest-memory emulation is not implemented");
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
         vk::PhysicalDeviceProperties2, vk::PhysicalDeviceVulkan11Properties,

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
@@ -870,14 +871,66 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
 
 namespace Shader {
 
-PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
-    UNREACHABLE_MSG("RegisterWalkerCode unimplemented for target architecture.");
+PFN_SrtWalker RegisterWalkerCode(const u8* /*ptr*/, size_t /*size*/) {
+    // An ARM64 process cannot restore a serialized x86-64 SRT walker. Cache versions are
+    // bumped alongside this port, so new shader metadata stores read descriptors instead.
+    return nullptr;
 }
 
 namespace Optimization {
 
 void FlattenExtendedUserdataPass(IR::Program& program) {
-    UNREACHABLE_MSG("FlattenExtendedUserdataPass unimplemented for target architecture.");
+    auto& info = program.info;
+    constexpr u32 first_slot = NUM_USER_DATA_REGS;
+    u32 next_slot = first_slot;
+    bool unresolved = false;
+    std::map<std::pair<u32, u32>, u16> slot_of;
+    info.flat_user_data_reads.clear();
+
+    for (IR::Block* const block : program.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() != IR::Opcode::ReadConst) {
+                continue;
+            }
+
+            const IR::Value index = inst.Arg(1);
+            IR::Inst* const base = inst.Arg(0).TryInst();
+            IR::Inst* const ptr_lo = base &&
+                    base->GetOpcode() == IR::Opcode::CompositeConstructU32x2
+                ? base->Arg(0).TryInst()
+                : nullptr;
+            if (!ptr_lo || ptr_lo->GetOpcode() != IR::Opcode::GetUserData ||
+                !index.IsImmediate()) {
+                unresolved = true;
+                continue;
+            }
+
+            const u32 sgpr = static_cast<u32>(ptr_lo->Arg(0).ScalarReg());
+            const std::pair<u32, u32> key{sgpr, index.U32()};
+            auto it = slot_of.find(key);
+            if (it == slot_of.end()) {
+                if (next_slot > std::numeric_limits<u16>::max()) {
+                    unresolved = true;
+                    continue;
+                }
+                const auto slot = static_cast<u16>(next_slot++);
+                it = slot_of.emplace(key, slot).first;
+                info.flat_user_data_reads.push_back({sgpr, index.U32(), slot});
+            }
+            inst.SetFlags(it->second);
+        }
+    }
+
+    info.srt_info.walker_func = nullptr;
+    info.srt_info.walker_func_size = 0;
+    info.srt_info.flattened_bufsize_dw = next_slot;
+    info.flat_user_data_unresolved = unresolved;
+    if (unresolved) {
+        LOG_ERROR(Render_Recompiler,
+                  "ARM64 SRT flattening rejected unsupported reads in shader {:#018x}",
+                  info.pgm_hash);
+    }
+    info.RefreshFlatBuf();
 }
 
 } // namespace Optimization

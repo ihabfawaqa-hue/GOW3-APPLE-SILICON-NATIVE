@@ -45,15 +45,31 @@ static void free_submission(RetainedSubmission *submission) {
   free(submission);
 }
 
-static void free_all_retained(void) {
-  RetainedSubmission *submission = g_retained_submissions;
-  g_retained_submissions = NULL;
-  g_retained_bytes = 0;
+/* Command buffer copies handed to the GPU thread in each of the last frames
+ * (see ps4_gow3gpu_submit_done_pipelined). */
+#define GOW3GPU_RETAINED_FRAMES 3u
+static RetainedSubmission *g_retained_frames[GOW3GPU_RETAINED_FRAMES];
+static unsigned g_retained_frame_index;
+
+static uint64_t free_submission_list(RetainedSubmission *submission) {
+  uint64_t bytes = 0;
   while (submission) {
     RetainedSubmission *next = submission->next;
+    bytes += submission->bytes;
     free_submission(submission);
     submission = next;
   }
+  return bytes;
+}
+
+static void free_all_retained(void) {
+  free_submission_list(g_retained_submissions);
+  g_retained_submissions = NULL;
+  for (unsigned i = 0; i < GOW3GPU_RETAINED_FRAMES; ++i) {
+    free_submission_list(g_retained_frames[i]);
+    g_retained_frames[i] = NULL;
+  }
+  g_retained_bytes = 0;
 }
 
 static int valid_memory_api(const Gow3GpuGuestMemoryApi *api) {
@@ -231,8 +247,14 @@ int32_t ps4_gow3gpu_submit_guest_arrays(
 int32_t ps4_gow3gpu_backend_submit_done(void) {
   if (!ps4_gow3gpu_submission_backend_active())
     return (int32_t)GOW3GPU_GNM_ERROR;
-  return ps4_gow3gpu_submit_done(g_backend_submit_done,
-                                 g_backend_wait_idle);
+  static int sync = -1;
+  if (sync < 0) {
+    const char *value = getenv("PS4_GOW3GPU_SYNC_SUBMIT_DONE");
+    sync = value && value[0] == '1';
+  }
+  return sync ? ps4_gow3gpu_submit_done(g_backend_submit_done, g_backend_wait_idle)
+              : ps4_gow3gpu_submit_done_pipelined(g_backend_submit_done,
+                                                  g_backend_wait_idle);
 }
 
 int32_t ps4_gow3gpu_submit_from_context(
@@ -371,6 +393,31 @@ int32_t ps4_gow3gpu_submit_done(Ps4Gow3GpuSubmitDoneFn submit_done,
   int32_t result = submit_done();
   if (result == 0) result = wait_idle();
   if (result == 0) free_all_retained();
+  pthread_mutex_unlock(&g_submit_mutex);
+  return result;
+}
+
+int32_t ps4_gow3gpu_submit_done_pipelined(Ps4Gow3GpuSubmitDoneFn submit_done,
+                                          Ps4Gow3GpuWaitIdleFn wait_idle) {
+  if (!submit_done || !wait_idle) return (int32_t)GOW3GPU_GNM_ERROR;
+  pthread_mutex_lock(&g_submit_mutex);
+  /* The imported sceGnmSubmitDone blocks until the GPU went idle when it was still busy at
+   * the previous call, so on return everything submitted before the previous frame's
+   * SubmitDone has been read. Freeing copies a few frames old needs no GPU wait: a wait
+   * here for the whole queue each frame kept the game thread from preparing the next
+   * frame while the GPU worked (low frame rate, late audio, lurching cutscenes). */
+  int32_t result = submit_done();
+  if (result == 0) {
+    RetainedSubmission *oldest = g_retained_frames[g_retained_frame_index];
+    g_retained_bytes -= free_submission_list(oldest);
+    g_retained_frames[g_retained_frame_index] = g_retained_submissions;
+    g_retained_submissions = NULL;
+    g_retained_frame_index = (g_retained_frame_index + 1) % GOW3GPU_RETAINED_FRAMES;
+    if (g_retained_bytes > GOW3GPU_MAX_RETAINED_BYTES / 2) {
+      result = wait_idle();
+      if (result == 0) free_all_retained();
+    }
+  }
   pthread_mutex_unlock(&g_submit_mutex);
   return result;
 }

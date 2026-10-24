@@ -3,6 +3,7 @@
 #include "ps4_direct_mem.h"
 
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -11,6 +12,11 @@
 // direct-memory module supplies the weak hook used by the current Metal path.
 extern void ps4_gnm_notify_cpu_write(uint64_t addr, uint64_t size)
     __attribute__((weak));
+
+void recomp_notify_host_write(uint64_t guest_addr, size_t size) {
+  if (size && ps4_gnm_notify_cpu_write)
+    ps4_gnm_notify_cpu_write(guest_addr, size);
+}
 
 static GuestContext *process_context(GuestContext *ctx) {
   return ctx && ctx->process_ctx ? ctx->process_ctx : ctx;
@@ -47,6 +53,32 @@ static void memory_unlock(GuestContext *proc) {
   g_memory_lock_process = NULL;
   pthread_mutex_unlock(&proc->vm_mutex);
   ps4_direct_mem_guest_access_unlock();
+}
+
+// A renderer write-tracking fault inside a lease copy (a GPU label store into a
+// tracked page) runs the renderer's handler, which takes its cache locks and waits
+// for its draw thread. Those hold the cache locks while reading guest memory, so
+// they wait for vm_mutex: keeping this thread's lease locks across the handler
+// deadlocks. The fault is synchronous inside the copy, so the locks are released
+// for the handler and taken again in the same order before the copy resumes.
+RecompGuestMemoryLockState recomp_guest_memory_suspend_thread_lock(void) {
+  RecompGuestMemoryLockState state = {g_memory_lock_process, g_memory_lock_depth};
+  if (!state.depth || !state.process)
+    return (RecompGuestMemoryLockState){NULL, 0};
+  g_memory_lock_process = NULL;
+  g_memory_lock_depth = 0;
+  pthread_mutex_unlock(&state.process->vm_mutex);
+  ps4_direct_mem_guest_access_unlock();
+  return state;
+}
+
+void recomp_guest_memory_resume_thread_lock(RecompGuestMemoryLockState state) {
+  if (!state.depth || !state.process)
+    return;
+  ps4_direct_mem_guest_access_lock();
+  pthread_mutex_lock(&state.process->vm_mutex);
+  g_memory_lock_process = state.process;
+  g_memory_lock_depth = state.depth;
 }
 
 static bool range_is_accessible_locked(GuestContext *proc, uint64_t start,
@@ -193,17 +225,68 @@ bool recomp_guest_memory_write(GuestContext *ctx, uint64_t guest_addr,
   return true;
 }
 
+static _Atomic uint64_t g_vm_generation;
+
+void recomp_vm_note_change(void) {
+  atomic_fetch_add_explicit(&g_vm_generation, 1, memory_order_release);
+}
+
+// The committed extent this thread last validated for a GPU read.
+static _Thread_local struct {
+  GuestContext *process;
+  uint64_t start, end, generation;
+} t_gpu_extent;
+
+bool recomp_guest_gpu_fast_range(GuestContext *ctx, uint64_t guest_addr,
+                                 size_t size, uint8_t **host) {
+  GuestContext *proc = process_context(ctx);
+  if (!proc || !proc->mem_base || !size || !guest_addr ||
+      guest_addr > proc->mem_size || size > proc->mem_size - guest_addr)
+    return false;
+  const uint64_t end = guest_addr + (uint64_t)size;
+  const uint64_t generation =
+      atomic_load_explicit(&g_vm_generation, memory_order_acquire);
+  if (t_gpu_extent.process != proc || t_gpu_extent.generation != generation ||
+      guest_addr < t_gpu_extent.start || end > t_gpu_extent.end) {
+    if (!memory_lock(proc))
+      return false;
+    const bool valid =
+        range_is_accessible_locked(proc, guest_addr, end, PROT_READ, false);
+    if (valid) {
+      for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
+        if (!e->is_free && guest_addr >= e->addr && end <= e->addr + e->size) {
+          t_gpu_extent.process = proc;
+          t_gpu_extent.start = e->addr;
+          t_gpu_extent.end = e->addr + e->size;
+          t_gpu_extent.generation = generation;
+          break;
+        }
+      }
+    }
+    memory_unlock(proc);
+    if (!valid)
+      return false;
+  }
+  *host = proc->mem_base + guest_addr;
+  return true;
+}
+
 bool recomp_guest_gpu_memory_read(GuestContext *ctx, uint64_t guest_addr,
                                   void *destination, size_t size) {
   if (!destination)
     return false;
-  RecompGuestMemoryLease lease;
-  if (!recomp_guest_gpu_memory_acquire(ctx, guest_addr, size, PROT_READ,
-                                       &lease))
-    return false;
-  memcpy(destination, lease.host_pointer, size);
-  recomp_guest_memory_release(&lease);
-  return true;
+  // GPU reads (descriptors, constants, indices: thousands per frame from two
+  // GPU threads) skip the lease. The whole guest range is one host RW mapping
+  // and unmapping replaces pages with zero pages, so a read cannot fault the
+  // host; it may see bytes a concurrent remap is replacing, as the hardware
+  // GPU would. Taking both VM locks per read kept the GPU threads waiting on
+  // each other most of the frame.
+  uint8_t *host;
+  if (recomp_guest_gpu_fast_range(ctx, guest_addr, size, &host)) {
+    memcpy(destination, host, size);
+    return true;
+  }
+  return false;
 }
 
 bool recomp_guest_gpu_memory_write(GuestContext *ctx, uint64_t guest_addr,

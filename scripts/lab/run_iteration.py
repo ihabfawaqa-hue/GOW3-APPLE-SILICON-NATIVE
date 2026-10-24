@@ -467,7 +467,8 @@ def convert_candidate_frame_dumps(run_dir: Path, text: str) -> list[dict[str, ob
     """Convert only known 8-bit Vulkan output formats into screenshot PNGs."""
     converted: list[dict[str, object]] = []
     for match in re.finditer(
-        r"\[gow3gpu-frame\] raw file=([^\s]+) format=([^\s]+) width=(\d+) height=(\d+)",
+        r"\[gow3gpu-frame\] raw file=([^\s]+) format=([^\s]+) width=(\d+) height=(\d+)"
+        r"(?: storage=([^\s]+))?",
         text,
     ):
         filename, vk_format = match.group(1), match.group(2)
@@ -476,6 +477,7 @@ def convert_candidate_frame_dumps(run_dir: Path, text: str) -> list[dict[str, ob
         record: dict[str, object] = {
             "raw_file": str(source.relative_to(run_dir)),
             "format": vk_format,
+            "storage_format": match.group(5) or vk_format,
             "width": width,
             "height": height,
             "status": "NOT_CONVERTED",
@@ -494,6 +496,10 @@ def convert_candidate_frame_dumps(run_dir: Path, text: str) -> list[dict[str, ob
                 pixel_order = "RGBA8"
             else:
                 raise ValueError(f"unsupported output image format {vk_format}")
+            # The presenter samples display buffers with alpha swizzled to one, so a zero
+            # alpha in guest memory is not transparency on screen: write opaque PNGs.
+            rgba = bytearray(rgba)
+            rgba[3::4] = b"\xff" * (width * height)
             prefix = "frame_candidate_output" if filename.startswith("output_") else "frame_candidate_display"
             target = run_dir / "frames" / f"{prefix}_{source.stem}.png"
             write_rgba_png(target, width, height, bytes(rgba))
@@ -701,6 +707,14 @@ def main() -> int:
     parser.add_argument("--build-no-progress-seconds", type=float, default=180)
     parser.add_argument("--no-progress-seconds", type=float, default=25)
     parser.add_argument("--screenshot-every", type=int, default=60)
+    parser.add_argument("--frame-dump-every", type=int, default=240,
+                        help="candidate presenter frames between raw frame dumps")
+    parser.add_argument("--frame-dump-max", type=int, default=4,
+                        help="maximum candidate raw frame dumps per run")
+    parser.add_argument("--pass-capture-every", type=int, default=240,
+                        help="candidate frames between render-pass traces")
+    parser.add_argument("--pass-capture-max", type=int, default=3,
+                        help="maximum candidate render-pass traces per run")
     parser.add_argument("--max-log-mb", type=int, default=32)
     parser.add_argument("--max-capture-mb", type=int, default=512)
     parser.add_argument("--max-rss-mb", type=int, default=8192)
@@ -868,10 +882,10 @@ def main() -> int:
         dump_trigger.touch()
         runtime_env["GOW3_DUMP_DIR"] = str(run_dir / "candidate-dump")
         runtime_env["GOW3_FRAME_DUMP_TRIGGER"] = str(dump_trigger)
-        runtime_env["GOW3_FRAME_DUMP_EVERY"] = "240"
-        runtime_env["GOW3_FRAME_DUMP_MAX"] = "4"
-        runtime_env["GOW3_CAPTURE_EVERY"] = "240"
-        runtime_env["GOW3_CAPTURE_MAX"] = "3"
+        runtime_env["GOW3_FRAME_DUMP_EVERY"] = str(max(1, args.frame_dump_every))
+        runtime_env["GOW3_FRAME_DUMP_MAX"] = str(max(0, args.frame_dump_max))
+        runtime_env["GOW3_CAPTURE_EVERY"] = str(max(1, args.pass_capture_every))
+        runtime_env["GOW3_CAPTURE_MAX"] = str(max(0, args.pass_capture_max))
     runtime_env["PS4_AUDIO_LOG"] = "1"
     runtime_env["PS4_AJM_LOG"] = "1"
     audio_dump_path = run_dir / "audio-mix.wav"

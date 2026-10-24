@@ -112,10 +112,10 @@ static int guest_atomic_load(void *user_context, uint64_t address, uint32_t size
       (size != 1 && size != 4 && size != 8) || address % size ||
       !ctx)
     return 0;
-  RecompGuestMemoryLease lease;
-  if (!recomp_guest_gpu_memory_acquire(ctx, address, size, PROT_READ, &lease))
+  /* Aligned atomic loads need no VM lock (see recomp_guest_gpu_memory_read). */
+  uint8_t *p;
+  if (!recomp_guest_gpu_fast_range(ctx, address, size, &p))
     return 0;
-  const void *p = lease.host_pointer;
   switch (size) {
   case 1:
     *value = __atomic_load_n((const uint8_t *)p, __ATOMIC_ACQUIRE);
@@ -127,7 +127,6 @@ static int guest_atomic_load(void *user_context, uint64_t address, uint32_t size
     *value = __atomic_load_n((const uint64_t *)p, __ATOMIC_ACQUIRE);
     break;
   }
-  recomp_guest_memory_release(&lease);
   return 1;
 }
 
@@ -459,7 +458,11 @@ const Gow3GpuGuestMemoryApi *ps4_gow3gpu_runtime_memory_api(void) {
 int ps4_gow3gpu_dispatch_fault(void *ucontext, void *address) {
   Ps4Gow3GpuFaultHandler handler =
       atomic_load_explicit(&g_gow3gpu_fault_handler, memory_order_acquire);
-  return handler ? handler(ucontext, address) : 0;
+  if (!handler) return 0;
+  const RecompGuestMemoryLockState held = recomp_guest_memory_suspend_thread_lock();
+  const int handled = handler(ucontext, address);
+  recomp_guest_memory_resume_thread_lock(held);
+  return handled;
 }
 
 void ps4_gow3gpu_guest_map(uint64_t address, uint64_t size) {

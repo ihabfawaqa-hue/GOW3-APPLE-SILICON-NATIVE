@@ -199,7 +199,9 @@ void shim_mmap(GuestContext *ctx) {
     // If not anonymous and valid fd, read file data into the mapped memory
     if (!(flags & 0x1000) && fd >= 0) {
       ssize_t nread;
+      recomp_notify_host_write(alloc_addr, len);
       PS4_HITCH_TIMED(PS4_HITCH_IO, nread = pread(fd, ctx->mem_base + alloc_addr, len, offset));
+      if (nread > 0) recomp_notify_host_write(alloc_addr, (size_t)nread);
       if (nread < 0) {
         fprintf(stderr, "[ps4-sys] mmap file read FAILED: fd=%d offset=%lld len=%zu errno=%d (%s)\n",
                 fd, (long long)offset, len, errno, strerror(errno));
@@ -258,7 +260,9 @@ void shim_read(GuestContext *ctx) {
   uint64_t buf_addr = ctx->rsi;
   size_t count = (size_t)ctx->rdx;
   ssize_t ret;
+  recomp_notify_host_write(buf_addr, count);
   PS4_HITCH_TIMED(PS4_HITCH_IO, ret = read(fd, ctx->mem_base + buf_addr, count));
+  if (ret > 0) recomp_notify_host_write(buf_addr, (size_t)ret);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -285,9 +289,12 @@ void shim_readv(GuestContext *ctx) {
   for (int i = 0; i < iovcnt; i++) {
     host_iov[i].iov_base = ctx->mem_base + guest_iov[i].iov_base;
     host_iov[i].iov_len = (size_t)guest_iov[i].iov_len;
+    recomp_notify_host_write(guest_iov[i].iov_base, host_iov[i].iov_len);
   }
 
   ssize_t ret = readv(fd, host_iov, iovcnt);
+  for (int i = 0; ret > 0 && i < iovcnt; i++)
+    recomp_notify_host_write(guest_iov[i].iov_base, host_iov[i].iov_len);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -303,7 +310,9 @@ void shim_sceKernelPread(GuestContext *ctx) {
   off_t offset = (off_t)ctx->rcx;
 
   ssize_t ret;
+  recomp_notify_host_write(buf_addr, nbytes);
   PS4_HITCH_TIMED(PS4_HITCH_IO, ret = pread(fd, ctx->mem_base + buf_addr, nbytes, offset));
+  if (ret > 0) recomp_notify_host_write(buf_addr, (size_t)ret);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -331,10 +340,13 @@ void shim_sceKernelPreadv(GuestContext *ctx) {
   for (int i = 0; i < iovcnt; i++) {
     host_iov[i].iov_base = ctx->mem_base + guest_iov[i].iov_base;
     host_iov[i].iov_len = (size_t)guest_iov[i].iov_len;
+    recomp_notify_host_write(guest_iov[i].iov_base, host_iov[i].iov_len);
   }
 
   ssize_t ret;
   PS4_HITCH_TIMED(PS4_HITCH_IO, ret = preadv(fd, host_iov, iovcnt, offset));
+  for (int i = 0; ret > 0 && i < iovcnt; i++)
+    recomp_notify_host_write(guest_iov[i].iov_base, host_iov[i].iov_len);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -1154,7 +1166,9 @@ void shim_syscall(GuestContext *ctx) {
     uint64_t buf = ctx->rdx;
     size_t count = (size_t)ctx->rcx;
     ssize_t ret;
+    recomp_notify_host_write(buf, count);
     PS4_HITCH_TIMED(PS4_HITCH_IO, ret = read(fd, ctx->mem_base + buf, count));
+    if (ret > 0) recomp_notify_host_write(buf, (size_t)ret);
     if (ret < 0) set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();

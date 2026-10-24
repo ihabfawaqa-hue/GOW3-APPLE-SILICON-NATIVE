@@ -19,7 +19,7 @@ Review `git status --short` and `git log -1` before editing. Preserve existing c
 
 The candidate backend initializes KosmicKrisp on the M2, registers its GNM symbols, receives real guest PM4 submissions, and its VideoOut route opens, registers three buffers, accepts guest flips, and reaches the Vulkan presenter. Run `run_20261024_064805_480945` records indexed draws and BC1/BC4 sample descriptors. It captures a readable Santa Monica Studio logo from the guest display buffer.
 
-Two different internal captures of that logo disagree: the guest display PNG is blue/purple and the presenter-stage readback is red/beige. The latter is taken from `frame->image` before the swapchain blit, in `Presenter::PrepareFrame`; it is not a macOS desktop screenshot. Treat this as a real discrepancy in the internal presentation path, not yet as proof of the user's on-screen colors.
+Two different internal captures of that logo disagree: the guest display PNG is blue/purple and the presenter-stage readback is red/beige. The latter is taken from `frame->image` before the swapchain blit, in `Presenter::PrepareFrame`; it is not a macOS desktop screenshot. **Resolved 2026-10-24:** this was a capture-label error, not a GPU conversion bug. The display dump was tagged with the image storage format (`R8G8B8A8Srgb`) although the bytes are BGRA and the presenter samples them through a `B8G8R8A8Srgb` view. The dump now logs the view format; see DECISIONS.md and run `run_20261024_094111_848285`.
 
 The four later sampled frames are black or flat. The most recent repeated run (`run_20261024_065405_105444`) has the same bounded behavior. No God of War scene follows the logo. Do not call this G8, authentic graphics, a working menu, or gameplay.
 
@@ -71,10 +71,18 @@ Only one GPU-heavy instance at a time. The harness bounds runtime, logs, screens
 
 ## Highest-leverage next work
 
-1. **Resolve the color discrepancy with a controlled test.** Compare the raw `display_003_1920x1080.raw` and `output_003_1710x961.raw` bytes against the recorded `R8G8B8A8Srgb` and `B8G8R8A8Unorm` tags. Add an unmistakable color-bar/offscreen probe through the same `GetFrameViewFormat` → FSR → post-process path. Inspect `third_party/gow3gpu/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp` and `vk_swapchain.cpp`. Separate capture byte order from actual GPU color conversion. Do not patch guest texture descriptors or shaders from the logo screenshot.
+1. ~~**Resolve the color discrepancy with a controlled test.**~~ Done: capture-label error (DECISIONS.md). Compare the raw `display_003_1920x1080.raw` and `output_003_1710x961.raw` bytes against the recorded `R8G8B8A8Srgb` and `B8G8R8A8Unorm` tags. Add an unmistakable color-bar/offscreen probe through the same `GetFrameViewFormat` → FSR → post-process path. Inspect `third_party/gow3gpu/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp` and `vk_swapchain.cpp`. Separate capture byte order from actual GPU color conversion. Do not patch guest texture descriptors or shaders from the logo screenshot.
 2. **Attribute the live buffer path.** Add bounded structured logs for cache mode, guest address range, VkBuffer/BDA mapping, and alias generation for the captured draw. Validate resident-range allocation/migration and guest-visible writes on those same resources; then exercise vertex/index/indirect consumers.
 3. **Close the completion contract.** Trace one real guest flip label and wait through PM4 submit, Vulkan completion, host callback, label store, event delivery, and waiting-thread wake. Preserve the primary runtime's event ownership unless the exact adapter contract proves a safe transfer.
 4. **Capture a resource-complete post-logo pass and build deterministic replay.** The current trace has a small number of draws and BC1/BC4 identities but not all descriptors, backing bytes, and producer dependencies. Replay must include the actual resource-producing pass before changing shaders or render state.
 5. Continue until repeatable recognizable God of War imagery appears. Only then proceed to menu, controller, audio/video presentation, gameplay, and performance.
 
 Update `docs/engineering/STATUS.md`, `BLOCKERS.md`, `DECISIONS.md`, and `TEST_MATRIX.md` with evidence. The current detailed snapshot is maintained there. Keep the custom Metal path diagnostic-only and preserve the two-opening-screen baseline.
+
+## Update, 2026-10-24 evening
+
+The candidate route now reaches the menu and textured gameplay. Fixed: the post-splash deadlock, single-sample MSAA scene targets, stale streamed textures, host-syscall writes the GPU did not see, guest-memory lock contention and the per-frame GPU-idle wait (details and evidence in DECISIONS.md). The open blockers are GPU throughput (5–9 FPS at 82–98% GPU utilization) and cutscene audio sync (BLOCKERS.md).
+
+Diagnostics added (all off unless set): `GOW3_CAPTURE_FLIP_BOUNDARY`, `GOW3_CAPTURE_DUMP_IMAGES`, `GOW3_CAPTURE_DUMP_TARGETS`, `GOW3_CAPTURE_DUMP_BC`, `GOW3_LOG_IMAGES`, `GOW3_DISABLE_OPTIMIZATIONS`, `PS4_GOW3GPU_SYNC_SUBMIT_DONE`, and harness options `--frame-dump-every/max`, `--pass-capture-every/max`. `PS4_PAD_AUTOPRESS=4000` skips the intro movie and starts New Game headlessly; gameplay starts about 150–200 s in.
+
+Next: measure per-pass GPU cost with Instruments/Xcode (timestamp queries lose the KosmicKrisp device), then test render-resolution scaling and tile load/store behavior.

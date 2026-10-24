@@ -29,6 +29,9 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+#include <unordered_set>
+#include <vk_mem_alloc.h>
+
 namespace Vulkan {
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
@@ -97,6 +100,238 @@ inline AmdGpu::CbDbExtent Rasterizer::DbExtent() const {
 }
 
 namespace {
+// gow3: GOW3_CAPTURE_DUMP_IMAGES=1: while a frame capture (GOW3_CAPTURE_TRIGGER) records, every
+// uncompressed image a draw samples is written once, mip 0 layer 0, as raw texels to
+// GOW3_DUMP_DIR (depth images: their depth aspect). Diagnoses which pass input is wrong.
+u32 DumpTexelBytes(vk::Format format) {
+    switch (format) {
+    case vk::Format::eR8Unorm:
+        return 1;
+    case vk::Format::eR8G8Unorm:
+    case vk::Format::eR16Sfloat:
+    case vk::Format::eR16Unorm:
+    case vk::Format::eD16Unorm:
+        return 2;
+    case vk::Format::eR8G8B8A8Unorm:
+    case vk::Format::eR8G8B8A8Srgb:
+    case vk::Format::eR8G8B8A8Uint:
+    case vk::Format::eB8G8R8A8Unorm:
+    case vk::Format::eB8G8R8A8Srgb:
+    case vk::Format::eA2B10G10R10UnormPack32:
+    case vk::Format::eB10G11R11UfloatPack32:
+    case vk::Format::eR16G16Sfloat:
+    case vk::Format::eR16G16Unorm:
+    case vk::Format::eR32Sfloat:
+    case vk::Format::eR32Uint:
+    case vk::Format::eD32Sfloat:
+    case vk::Format::eD32SfloatS8Uint:
+        return 4;
+    case vk::Format::eR16G16B16A16Sfloat:
+    case vk::Format::eR16G16B16A16Unorm:
+    case vk::Format::eR32G32Sfloat:
+        return 8;
+    case vk::Format::eR32G32B32A32Sfloat:
+        return 16;
+    default:
+        return 0;
+    }
+}
+
+// gow3: GOW3_CAPTURE_DUMP_BC=1: block-compressed textures with mips, every level concatenated
+// (the host copy, after detiling), plus the guest layout of each level, for checking detiling.
+void DumpBlockImage(const Instance& instance, Scheduler& scheduler, Runtime& runtime,
+                    VideoCore::Image& image, vk::ImageLayout read_layout) {
+    static const bool enabled = std::getenv("GOW3_CAPTURE_DUMP_BC") != nullptr;
+    if (!enabled || !FrameCapture::IsRecording()) {
+        return;
+    }
+    static u32 serial = ~0u;
+    static std::unordered_set<VAddr> dumped;
+    if (FrameCapture::RecordingSerial() != serial) {
+        serial = FrameCapture::RecordingSerial();
+        dumped.clear();
+    }
+    const auto& info = image.info;
+    u32 block_bytes = 0;
+    switch (info.pixel_format) {
+    case vk::Format::eBc1RgbaUnormBlock:
+    case vk::Format::eBc1RgbaSrgbBlock:
+    case vk::Format::eBc4UnormBlock:
+        block_bytes = 8;
+        break;
+    case vk::Format::eBc3UnormBlock:
+    case vk::Format::eBc3SrgbBlock:
+    case vk::Format::eBc5UnormBlock:
+    case vk::Format::eBc7UnormBlock:
+    case vk::Format::eBc7SrgbBlock:
+        block_bytes = 16;
+        break;
+    default:
+        return;
+    }
+    const u32 levels = info.resources.levels;
+    if (levels < 2 || info.props.is_volume || dumped.size() >= 48 ||
+        !dumped.insert(info.guest_address).second) {
+        return;
+    }
+    std::vector<vk::BufferImageCopy> copies;
+    std::string layout;
+    VkDeviceSize size = 0;
+    for (u32 m = 0; m < levels; ++m) {
+        const u32 mw = std::max(info.size.width >> m, 1u);
+        const u32 mh = std::max(info.size.height >> m, 1u);
+        copies.push_back({.bufferOffset = size,
+                          .imageSubresource = {vk::ImageAspectFlagBits::eColor, m, 0, 1},
+                          .imageExtent = {mw, mh, 1}});
+        size += VkDeviceSize((mw + 3) / 4) * ((mh + 3) / 4) * block_bytes;
+        const auto& mip = info.mips_layout[m];
+        layout += fmt::format(" m{}:{:#x}+{:#x}/p{}h{}", m, mip.offset, mip.size, mip.pitch,
+                              mip.height);
+    }
+    const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                       .size = size,
+                                       .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    const VmaAllocationCreateInfo alloc_ci{
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo alloc_info{};
+    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
+                        &alloc_info) != VK_SUCCESS) {
+        return;
+    }
+    runtime.FlushBarriers();
+    runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    scheduler.EndRendering();
+    scheduler.Record([src = image.GetImage(), dst = vk::Buffer{buffer},
+                      copies](vk::CommandBuffer cmdbuf) {
+        cmdbuf.copyImageToBuffer(src, vk::ImageLayout::eTransferSrcOptimal, dst, copies);
+    });
+    runtime.Transit(&image, read_layout, vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+
+    const char* dir = std::getenv("GOW3_DUMP_DIR");
+    const std::string name = fmt::format("bc_{:03}_{:x}_{}x{}_l{}.raw", serial, info.guest_address,
+                                         info.size.width, info.size.height, levels);
+    // The guest bytes as they are now (tiled), next to the host copy, to tell detiling errors
+    // from guest memory that holds no texture.
+    if (info.guest_size && info.guest_size <= 64_MB) {
+        std::vector<u8> guest(info.guest_size);
+        if (Core::Memory::Instance()->CopySparseMemory(info.guest_address, guest.data(),
+                                                       guest.size())) {
+            const std::string guest_path = std::string{dir && *dir ? dir : "out/dump"} + "/" +
+                                           name.substr(0, name.size() - 4) + ".guest";
+            if (FILE* f = std::fopen(guest_path.c_str(), "wb")) {
+                std::fwrite(guest.data(), 1, guest.size(), f);
+                std::fclose(f);
+            }
+        }
+    }
+    std::fprintf(stderr,
+                 "[gow3gpu-bc] file=%s format=%s tile=%s pitch=%u guest_size=%#x "
+                 "bank_swizzle=%u alt=%d layout=%s\n",
+                 name.c_str(), vk::to_string(info.pixel_format).c_str(),
+                 std::string(magic_enum::enum_name(info.tile_mode)).c_str(), info.pitch,
+                 info.guest_size, u32(info.bank_swizzle), info.alt_tile ? 1 : 0, layout.c_str());
+    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation,
+                                      alloc_info, size,
+                                      path = std::string{dir && *dir ? dir : "out/dump"} + "/" +
+                                             name] {
+        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
+        if (FILE* f = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(alloc_info.pMappedData, 1, size, f);
+            std::fclose(f);
+        }
+        vmaDestroyBuffer(allocator, buffer, allocation);
+    });
+}
+
+/// pass < 0: an image a draw samples. pass >= 0: a render target as that pass left it
+/// (GOW3_CAPTURE_DUMP_TARGETS), dumped once per pass.
+void DumpSampledImage(const Instance& instance, Scheduler& scheduler, Runtime& runtime,
+                      VideoCore::Image& image, vk::ImageLayout read_layout, int pass = -1) {
+    static const bool enabled = std::getenv("GOW3_CAPTURE_DUMP_IMAGES") != nullptr;
+    if (!enabled || !FrameCapture::IsRecording()) {
+        return;
+    }
+    static u32 serial = ~0u;
+    static std::unordered_set<u64> dumped;
+    if (FrameCapture::RecordingSerial() != serial) {
+        serial = FrameCapture::RecordingSerial();
+        dumped.clear();
+    }
+    const auto& info = image.info;
+    const u32 texel = DumpTexelBytes(info.pixel_format);
+    if (!texel || info.props.is_block || info.num_samples > 1 || dumped.size() >= 96 ||
+        !dumped.insert(info.guest_address ^ (u64(info.pixel_format) << 48) ^
+                       (u64(pass + 1) << 40)).second) {
+        return;
+    }
+    const u32 w = info.size.width;
+    const u32 h = info.size.height;
+    const u32 d = info.props.is_volume ? std::max(info.size.depth, 1u) : 1u;
+    const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                       .size = VkDeviceSize(w) * h * d * texel,
+                                       .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    const VmaAllocationCreateInfo alloc_ci{
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo alloc_info{};
+    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
+                        &alloc_info) != VK_SUCCESS) {
+        return;
+    }
+    // The read transition queued for this draw goes first, then transfer and back.
+    runtime.FlushBarriers();
+    runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    scheduler.EndRendering();
+    const auto aspect =
+        info.props.is_depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor;
+    scheduler.Record([src = image.GetImage(), dst = vk::Buffer{buffer}, w, h, d,
+                      aspect](vk::CommandBuffer cmdbuf) {
+        cmdbuf.copyImageToBuffer(src, vk::ImageLayout::eTransferSrcOptimal, dst,
+                                 vk::BufferImageCopy{.imageSubresource = {aspect, 0, 0, 1},
+                                                     .imageExtent = {w, h, d}});
+    });
+    runtime.Transit(&image, read_layout, vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+
+    const char* dir = std::getenv("GOW3_DUMP_DIR");
+    const std::string prefix = pass < 0 ? fmt::format("img_{:03}", serial)
+                                        : fmt::format("rt_{:03}_p{:03}", serial, pass);
+    const std::string name = d > 1 ? fmt::format("{}_{:x}_{}x{}x{}.raw", prefix,
+                                                 info.guest_address, w, h, d)
+                                   : fmt::format("{}_{:x}_{}x{}.raw", prefix,
+                                                 info.guest_address, w, h);
+    std::fprintf(stderr,
+                 "[gow3gpu-image] file=%s format=%s width=%u height=%u addr=%#llx type=%u "
+                 "depth=%u layers=%u levels=%u volume=%d size=%#llx\n",
+                 name.c_str(), vk::to_string(info.pixel_format).c_str(), w, h,
+                 static_cast<unsigned long long>(info.guest_address), u32(info.type),
+                 info.size.depth, u32(info.resources.layers), u32(info.resources.levels),
+                 info.props.is_volume ? 1 : 0, static_cast<unsigned long long>(info.guest_size));
+    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation,
+                                      alloc_info, size = buffer_ci.size,
+                                      path = std::string{dir && *dir ? dir : "out/dump"} + "/" +
+                                             name] {
+        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
+        if (FILE* f = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(alloc_info.pMappedData, 1, size, f);
+            std::fclose(f);
+        }
+        vmaDestroyBuffer(allocator, buffer, allocation);
+    });
+}
+
 /// magic_enum::enum_contains, from a table: it scans every enumerator (per texture per draw).
 bool IsKnownFormat(AmdGpu::DataFormat data_fmt, AmdGpu::NumberFormat num_fmt) {
     static const auto tables = [] {
@@ -2443,6 +2678,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             auto& image_view = texture_cache.FindTexture(
                 image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
             const auto binding = image.binding;
+            // gow3: a T# whose block-compressed format has another block size than the cached
+            // image at its address reads that image's texels as the wrong blocks (noise).
+            if (image.info.props.is_block && image_view.info.format != image.info.pixel_format) {
+                static std::atomic<u32> logged{0};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+                    std::fprintf(stderr,
+                                 "[gow3gpu-texfmt] addr=%#llx image=%s view=%s %ux%u levels=%u\n",
+                                 static_cast<unsigned long long>(image.info.guest_address),
+                                 vk::to_string(image.info.pixel_format).c_str(),
+                                 vk::to_string(image_view.info.format).c_str(),
+                                 image.info.size.width, image.info.size.height,
+                                 u32(image.info.resources.levels));
+                }
+            }
 
             // gow3: a proxied scene image sampled with normalized coordinates reads the proxy:
             // no resample to the native size (the native image is not touched).
@@ -2492,6 +2741,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             image.usage.texture |= !is_storage;
             if (FrameCapture::Active()) {
                 FrameCapture::Sampled(image.info, is_storage);
+                if (!is_storage && !binding.force_general && !binding.is_target) {
+                    DumpSampledImage(instance, scheduler, runtime, image,
+                                     image.backing->state.layout);
+                    DumpBlockImage(instance, scheduler, runtime, image,
+                                   image.backing->state.layout);
+                }
             }
 
             vk::ImageView view = *image_view.image_view;
@@ -3041,12 +3296,60 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto* depth =
             db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
         FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
+        DumpPassTargets(state.num_color_attachments);
     }
     // gow3: object motion vector attachment of G-buffer pipelines.
     if (key.motion_vectors) {
         object_motion->Attach(state, state.width, state.height);
     }
     return state;
+}
+
+// gow3: GOW3_CAPTURE_DUMP_TARGETS=<hex address>[,...] (with GOW3_CAPTURE_DUMP_IMAGES): while a
+// frame capture records, each listed color target is dumped as every pass leaves it, when the
+// next pass changes the bound targets.
+void Rasterizer::DumpPassTargets(u32 num_colors) {
+    static const std::vector<VAddr> targets = [] {
+        std::vector<VAddr> list;
+        for (const char* p = std::getenv("GOW3_CAPTURE_DUMP_TARGETS"); p && *p;) {
+            char* end{};
+            list.push_back(std::strtoull(p, &end, 16));
+            p = *end == ',' ? end + 1 : end;
+            if (end == p && *p) break;
+        }
+        return list;
+    }();
+    if (targets.empty() || !FrameCapture::IsRecording()) {
+        return;
+    }
+    static u32 serial = ~0u;
+    static int pass = 0;
+    static std::vector<VideoCore::ImageId> previous;
+    if (serial != FrameCapture::RecordingSerial()) {
+        serial = FrameCapture::RecordingSerial();
+        pass = 0;
+        previous.clear();
+    }
+    std::vector<VideoCore::ImageId> current;
+    for (u32 cb = 0; cb < num_colors; ++cb) {
+        current.push_back(cb_descs[cb].first);
+    }
+    current.push_back(db_desc.first);
+    if (current == previous) {
+        return;
+    }
+    for (size_t i = 0; i + 1 < previous.size(); ++i) {
+        if (!previous[i]) {
+            continue;
+        }
+        auto& image = texture_cache.GetImage(previous[i]);
+        if (std::ranges::find(targets, image.info.guest_address) != targets.end()) {
+            DumpSampledImage(instance, scheduler, runtime, image, image.backing->state.layout,
+                             pass);
+        }
+    }
+    previous = std::move(current);
+    ++pass;
 }
 
 void Rasterizer::Resolve() {

@@ -1065,6 +1065,7 @@ uint64_t recomp_vm_alloc_named_aligned(GuestContext *ctx, size_t size,
   }
 
   best->is_free = false;
+  recomp_vm_note_change();
   best->prot = prot;
   best->flags = flags;
   if (name) {
@@ -1167,6 +1168,7 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
   }
 
   curr->is_free = false;
+  recomp_vm_note_change();
   curr->prot = prot;
   curr->flags = flags;
   if (name) {
@@ -1275,6 +1277,7 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
     for (GuestVMExtent *e = proc->vm_extents; e; e = e->next)
       if (!e->is_free && !e->is_pinned && e->addr >= ranges[i].addr && e->addr + e->size <= ranges[i].addr + ranges[i].size)
         e->is_free = true;
+  recomp_vm_note_change();
   vm_coalesce_free(proc, start, end);
   pthread_mutex_unlock(&proc->vm_mutex);
   ps4_direct_mem_guest_access_unlock();

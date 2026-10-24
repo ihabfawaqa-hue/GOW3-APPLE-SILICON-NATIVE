@@ -62,7 +62,8 @@ private:
     void Print();
 
     static constexpr u32 NumSlices = 4;
-    static constexpr u32 SliceQueries = 4096;
+    // gow3: Metal (KosmicKrisp, MoltenVK) caps a timestamp counter heap at 4096 entries.
+    static constexpr u32 SliceQueries = 1024;
     static inline GpuProfiler* instance_ptr = nullptr;
 
     vk::Device device;

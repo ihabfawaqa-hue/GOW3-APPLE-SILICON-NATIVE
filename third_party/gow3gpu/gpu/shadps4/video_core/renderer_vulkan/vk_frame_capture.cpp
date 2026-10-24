@@ -239,7 +239,40 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     display = display && targets.size() == 1;
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
-    if (display && new_pass) {
+    // GOW3_CAPTURE_FLIP_BOUNDARY: menus draw their 3D scene straight into the display buffer
+    // with one target, which the heuristic above takes for the next frame and stops at. Bound
+    // the recording by guest flips instead: from the first pass after a flip to the next flip.
+    static const bool flip_boundary = std::getenv("GOW3_CAPTURE_FLIP_BOUNDARY") != nullptr;
+    if (flip_boundary) {
+        static u64 boundary_flip = 0;
+        static bool waiting = false;
+        const u64 flip = flips.load(std::memory_order_acquire);
+        const u32 current = state.load(std::memory_order_relaxed);
+        if (current == Armed) {
+            if (!waiting) {
+                waiting = true;
+                boundary_flip = flip;
+            }
+            if (flip == boundary_flip) {
+                return;
+            }
+            waiting = false;
+            boundary_flip = flip;
+            entries.clear();
+            pending_sampled.clear();
+            pending_buffers.clear();
+            pass_open = false;
+            serial.fetch_add(1, std::memory_order_relaxed);
+            state.store(Recording, std::memory_order_release);
+        } else if (current == Recording && flip != boundary_flip) {
+            Write(last_presented.load(std::memory_order_relaxed));
+            entries.clear();
+            pending_sampled.clear();
+            pending_buffers.clear();
+            state.store(Idle, std::memory_order_release);
+            return;
+        }
+    } else if (display && new_pass) {
         if (state.load(std::memory_order_relaxed) == Recording) {
             Write(last_presented.load(std::memory_order_relaxed));
             entries.clear();
@@ -252,6 +285,7 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
         pending_sampled.clear();
         pending_buffers.clear();
         pass_open = false;
+        serial.fetch_add(1, std::memory_order_relaxed);
         state.store(Recording, std::memory_order_release);
     }
     if (state.load(std::memory_order_relaxed) != Recording) {

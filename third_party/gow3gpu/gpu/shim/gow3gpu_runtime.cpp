@@ -32,7 +32,17 @@ extern "C" {
 // These state variables belong to the imported renderer. The app can inspect or
 // change optimization bits through the explicit GPU diagnostics API later; it
 // must not provide duplicate globals from its own runtime.
-std::uint64_t runtime_disabled_optimizations = 0;
+// GOW3_DISABLE_OPTIMIZATIONS=<hex Gow3Toggle bits> switches optimizations off for a whole
+// run, to bisect which one changes rendering.
+std::uint64_t runtime_disabled_optimizations = [] {
+    const char* value = std::getenv("GOW3_DISABLE_OPTIMIZATIONS");
+    const std::uint64_t bits = value ? std::strtoull(value, nullptr, 16) : 0;
+    if (bits) {
+        std::fprintf(stderr, "[gow3gpu-runtime] disabled optimizations 0x%llx\n",
+                     static_cast<unsigned long long>(bits));
+    }
+    return bits;
+}();
 __thread sigjmp_buf* runtime_fault_recover = nullptr;
 
 int gow3gpu_set_host_runtime_api(const Gow3GpuHostRuntimeApi* api) {

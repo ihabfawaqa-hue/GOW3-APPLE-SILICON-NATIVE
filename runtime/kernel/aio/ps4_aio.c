@@ -349,7 +349,9 @@ static void execute_read_request(GuestContext *ctx, const OrbisKernelAioRWReques
     size_t nbyte = (size_t)req->nbyte;
     off_t offset = (off_t)req->offset;
 
+    recomp_notify_host_write(req->buf, nbyte);
     ssize_t ret = pread(fd, buf, nbyte, offset);
+    if (ret > 0) recomp_notify_host_write(req->buf, (size_t)ret);
 
     if (req->result) {
         OrbisKernelAioResult *res = (OrbisKernelAioResult *)(ctx->mem_base + req->result);

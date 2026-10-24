@@ -179,6 +179,37 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
             format_info.usage = usage_flags;
         }
     }
+    // gow3: storage usage also limits the sample counts: drivers without multisampled storage
+    // images (KosmicKrisp on Apple GPUs) report 1 sample for it, which silently turned the
+    // game's MSAA scene targets into single-sample images that its resolve shaders, reading
+    // samples, saw as zero (flat, unlit objects). Multisampled targets get no storage usage.
+    const auto requested_samples = Vulkan::LiverpoolToVK::NumSamples(
+        info.num_samples, vk::SampleCountFlagBits::e1 | vk::SampleCountFlagBits::e2 |
+                              vk::SampleCountFlagBits::e4 | vk::SampleCountFlagBits::e8 |
+                              vk::SampleCountFlagBits::e16);
+    if (info.num_samples > 1 && image_format_properties.result == vk::Result::eSuccess &&
+        (usage_flags & vk::ImageUsageFlagBits::eStorage) &&
+        !(image_format_properties.value.imageFormatProperties.sampleCounts & requested_samples)) {
+        format_info.usage = usage_flags & ~vk::ImageUsageFlagBits::eStorage;
+        const auto without_storage =
+            instance.GetPhysicalDevice().getImageFormatProperties2(format_info);
+        if (without_storage.result == vk::Result::eSuccess &&
+            (without_storage.value.imageFormatProperties.sampleCounts & requested_samples)) {
+            usage_flags = format_info.usage;
+            format_features = FormatFeatureFlags(usage_flags);
+            image_format_properties = without_storage;
+            static std::atomic<u32> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+                std::fprintf(stderr,
+                             "[gow3gpu-msaa] %s %ux%u x%u: created without storage usage to keep "
+                             "its sample count\n",
+                             vk::to_string(supported_format).c_str(), info.size.width,
+                             info.size.height, info.num_samples);
+            }
+        } else {
+            format_info.usage = usage_flags;
+        }
+    }
     if (image_format_properties.result == vk::Result::eErrorFormatNotSupported) {
         LOG_ERROR(Render_Vulkan, "image format {} type {} is not supported (flags {}, usage {})",
                   vk::to_string(supported_format), vk::to_string(format_info.type),
@@ -209,6 +240,16 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     backing->num_samples = info.num_samples;
     backing->image = UniqueImage{instance.GetDevice(), instance.GetAllocator()};
     backing->image.Create(image_ci);
+    // gow3: GOW3_LOG_IMAGES=1: every image the cache creates, for finding images whose guest
+    // ranges overlap with different formats.
+    static const bool log_images = std::getenv("GOW3_LOG_IMAGES") != nullptr;
+    if (log_images) {
+        std::fprintf(stderr, "[gow3gpu-img] uid=%llu addr=%#llx size=%#x fmt=%s %ux%ux%u l%u tile=%u\n",
+                     static_cast<unsigned long long>(image_uid),
+                     static_cast<unsigned long long>(info.guest_address), info.guest_size,
+                     vk::to_string(info.pixel_format).c_str(), info.size.width, info.size.height,
+                     info.size.depth, u32(info.resources.levels), u32(info.tile_mode));
+    }
 
     Vulkan::SetObjectName(instance.GetDevice(), GetImage(),
                           "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{}", info.size.width,

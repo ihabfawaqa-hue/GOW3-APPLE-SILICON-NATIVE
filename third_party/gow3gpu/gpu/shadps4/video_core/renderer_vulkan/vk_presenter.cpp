@@ -349,7 +349,7 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 // gow3: raw copy of an image for GOW3_FRAME_DUMP_TRIGGER, written once the GPU is done.
 static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
                     vk::Image image, vk::ImageLayout layout, u32 w, u32 h, const char* name,
-                    int index, vk::Format format) {
+                    int index, vk::Format format, vk::Format storage_format) {
     const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                        .size = VkDeviceSize(w) * h * 4,
                                        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
@@ -371,8 +371,9 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
     char filename[256];
     std::snprintf(filename, sizeof(filename), "%s_%03d_%ux%u.raw", name, index, w, h);
     std::snprintf(path, sizeof(path), "%s/%s", dir && *dir ? dir : "out/dump", filename);
-    std::fprintf(stderr, "[gow3gpu-frame] raw file=%s format=%s width=%u height=%u\n",
-                 filename, vk::to_string(format).c_str(), w, h);
+    std::fprintf(stderr, "[gow3gpu-frame] raw file=%s format=%s width=%u height=%u storage=%s\n",
+                 filename, vk::to_string(format).c_str(), w, h,
+                 vk::to_string(storage_format).c_str());
     scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info,
                                       size = buffer_ci.size, file = std::string{path}] {
         vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
@@ -481,9 +482,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
                             vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
             runtime.FlushBarriers();
+            // Tag the bytes with the view format the presenter samples through: A8R8G8B8Srgb
+            // buffers are stored in an R8G8B8A8 image (ConvertPixelFormat) but hold BGRA bytes.
             DumpRaw(instance, draw_scheduler, cmdbuf, image.GetImage(),
                     vk::ImageLayout::eTransferSrcOptimal, image.info.size.width,
-                    image.info.size.height, "display", frame_dump_index,
+                    image.info.size.height, "display", frame_dump_index, view_info.format,
                     image.info.pixel_format);
         }
         image_view = *image.FindView(view_info).image_view;
@@ -525,7 +528,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &done});
         DumpRaw(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
                 frame->width, frame->height, "output", frame_dump_index,
-                swapchain.GetSurfaceFormat().format);
+                swapchain.GetSurfaceFormat().format, swapchain.GetSurfaceFormat().format);
         ++frame_dump_index;
     }
 

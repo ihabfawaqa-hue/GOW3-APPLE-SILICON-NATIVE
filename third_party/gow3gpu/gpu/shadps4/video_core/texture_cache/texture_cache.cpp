@@ -608,6 +608,24 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
     auto& cache_image = slot_images[cache_image_id];
     const bool safe_to_delete =
         scheduler.CurrentTick() - cache_image.tick_accessed_last > NumFramesBeforeRemoval;
+    // gow3: an image that is neither reused nor copied below keeps what the GPU wrote to it
+    // only on the host. God of War III streams level textures by copying them on the GPU into
+    // a pool viewed as wide RGBA32UI targets, then binds BC textures inside that range: those
+    // were uploaded from the guest memory under the copy (the previous level's textures,
+    // drawn as stripes and noise). Queue the GPU data for guest memory: the download runs
+    // outside the cache lock (a write here faults into this lock), and its write invalidates
+    // the new image, which uploads again. A queued image stays until the cache cleans it up.
+    // Only linear images: the download writes rows, so a tiled target (render targets the
+    // game reuses the memory of) would land untiled in guest memory and read back scrambled.
+    const auto publish_gpu_data = [&] {
+        if (False(cache_image.flags & ImageFlagBits::GpuModified) ||
+            cache_image.info.props.is_tiled) {
+            return false;
+        }
+        std::unique_lock lk{download_images_mutex};
+        download_images.emplace(cache_image_id);
+        return true;
+    };
 
     // Equal address
     if (image_info.guest_address == cache_image.info.guest_address) {
@@ -616,7 +634,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         if (image_info.BlockDim() != cache_image.info.BlockDim() ||
             lhs_block_size != rhs_block_size) {
             // Very likely this kind of overlap is caused by allocation from a pool.
-            if (safe_to_delete) {
+            if (!publish_gpu_data() && safe_to_delete) {
                 FreeImage(cache_image_id);
             }
             return {merged_image_id, -1, -1};
@@ -664,7 +682,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         // Size is greater but resources are not, because the tiling mode is different.
         // Likely the address is reused for a image with a different tiling mode.
         if (image_info.tile_mode != cache_image.info.tile_mode) {
-            if (safe_to_delete) {
+            if (!publish_gpu_data() && safe_to_delete) {
                 FreeImage(cache_image_id);
             }
             return {merged_image_id, -1, -1};
@@ -797,7 +815,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         }
 
         // Image isn't a subresource but a chance overlap.
-        if (safe_to_delete) {
+        if (!publish_gpu_data() && safe_to_delete) {
             FreeImage(cache_image_id);
         }
 
@@ -823,9 +841,11 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                     auto& merged_image = slot_images[merged_image_id];
                     runtime.CopyMip(&cache_image, &merged_image, mip, slice);
                     FreeImage(cache_image_id);
+                    return {merged_image_id, -1, -1};
                 }
             }
         }
+        publish_gpu_data();
     }
 
     return {merged_image_id, -1, -1};

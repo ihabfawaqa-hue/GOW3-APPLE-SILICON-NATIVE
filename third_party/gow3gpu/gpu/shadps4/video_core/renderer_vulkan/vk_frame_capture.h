@@ -33,6 +33,13 @@ public:
     static bool Active() {
         return state.load(std::memory_order_relaxed) != Idle;
     }
+    /// GPU thread: whether a frame is being recorded now (not just armed), and which one.
+    static bool IsRecording() {
+        return state.load(std::memory_order_relaxed) == RecordingState;
+    }
+    static u32 RecordingSerial() {
+        return serial.load(std::memory_order_relaxed);
+    }
     /// GPU thread, at every draw/dispatch: starts or ends a recording at frame boundaries.
     static void Poll();
 
@@ -52,7 +59,9 @@ public:
 
 private:
     enum : u32 { Idle, Armed, Recording };
+    static constexpr u32 RecordingState = Recording;
     static inline std::atomic<u32> state{Idle};
+    static inline std::atomic<u32> serial{0};
     static inline std::atomic<u64> flips{0};
     static inline std::atomic<VAddr> last_presented{0};
     static inline std::atomic<bool> requested{false};

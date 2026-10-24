@@ -42,6 +42,10 @@ int32_t ps4_gow3gpu_submit_from_context(
  * draw-pipe/deferred-signal retirement before releasing retained PM4 storage. */
 int32_t ps4_gow3gpu_submit_done(Ps4Gow3GpuSubmitDoneFn submit_done,
                                 Ps4Gow3GpuWaitIdleFn wait_idle);
+/* Like ps4_gow3gpu_submit_done without the GPU idle wait: the command buffer
+ * copies of a frame are freed GOW3GPU_RETAINED_FRAMES SubmitDone calls later. */
+int32_t ps4_gow3gpu_submit_done_pipelined(Ps4Gow3GpuSubmitDoneFn submit_done,
+                                          Ps4Gow3GpuWaitIdleFn wait_idle);
 
 /* Bounded diagnostic used by the isolated smoke and runtime observability. */
 uint64_t ps4_gow3gpu_retained_command_bytes(void);

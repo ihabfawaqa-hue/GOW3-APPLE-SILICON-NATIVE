@@ -66,10 +66,30 @@ bool recomp_guest_gpu_memory_acquire(GuestContext *ctx, uint64_t guest_addr,
                                      size_t size, int access,
                                      RecompGuestMemoryLease *lease);
 void recomp_guest_memory_release(RecompGuestMemoryLease *lease);
+// The calling thread's lease locks, dropped for a renderer page-fault handler that
+// interrupted a lease copy and taken again afterwards (see recomp_guest_memory.c).
+typedef struct RecompGuestMemoryLockState {
+  GuestContext *process;
+  unsigned depth;
+} RecompGuestMemoryLockState;
+// Host syscalls (read, pread, AIO, file mmap) write guest memory without the guest CPU, so
+// renderer page tracking never sees them. Call before the syscall (a tracked page is
+// write-protected and a syscall cannot fault through it) and after it (copies the renderer
+// made meanwhile must see the new bytes).
+void recomp_notify_host_write(uint64_t guest_addr, size_t size);
+RecompGuestMemoryLockState recomp_guest_memory_suspend_thread_lock(void);
+void recomp_guest_memory_resume_thread_lock(RecompGuestMemoryLockState state);
 bool recomp_guest_memory_read(GuestContext *ctx, uint64_t guest_addr,
                               void *destination, size_t size);
 bool recomp_guest_memory_write(GuestContext *ctx, uint64_t guest_addr,
                                const void *source, size_t size);
+// Called with vm_mutex held whenever an extent becomes committed or free: GPU
+// reads cache the extent they validated until the next change.
+void recomp_vm_note_change(void);
+// Host pointer for a GPU read of [guest_addr, +size) in committed guest memory,
+// usually without the VM locks (see recomp_guest_gpu_memory_read).
+bool recomp_guest_gpu_fast_range(GuestContext *ctx, uint64_t guest_addr,
+                                 size_t size, uint8_t **host);
 bool recomp_guest_gpu_memory_read(GuestContext *ctx, uint64_t guest_addr,
                                   void *destination, size_t size);
 bool recomp_guest_gpu_memory_write(GuestContext *ctx, uint64_t guest_addr,

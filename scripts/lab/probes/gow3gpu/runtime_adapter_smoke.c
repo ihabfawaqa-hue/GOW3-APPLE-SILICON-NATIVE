@@ -442,9 +442,16 @@ int main(void) {
       g_submitted_dcb[0] != 0xc0001000u ||
       g_submitted_ccb[0] != 0xc0001000u)
     return fail("candidate route copies guest arrays and PM4");
+  /* The game route keeps a frame's PM4 copies for three SubmitDone calls (the
+   * imported SubmitDone paces the CPU at most one frame ahead of the GPU). */
   if (ps4_gow3gpu_backend_submit_done() != 0 || g_submit_done_calls != 2 ||
+      ps4_gow3gpu_retained_command_bytes() != 16)
+    return fail("candidate route keeps PM4 for the frames in flight");
+  if (ps4_gow3gpu_backend_submit_done() != 0 ||
+      ps4_gow3gpu_backend_submit_done() != 0 ||
+      ps4_gow3gpu_backend_submit_done() != 0 || g_submit_done_calls != 5 ||
       ps4_gow3gpu_retained_command_bytes() != 0)
-    return fail("candidate route retires PM4 at submit-done");
+    return fail("candidate route retires PM4 three submit-dones later");
 
   pthread_mutex_destroy(&ctx.vm_mutex);
   munmap(memory, memory_size);

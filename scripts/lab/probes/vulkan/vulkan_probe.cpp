@@ -56,6 +56,7 @@ struct Results {
     bool offscreen_clear_readback_passed{};
     bool image_alias_readback_passed{};
     bool view_reinterpretation_created{};
+    bool bda_page_table_indirection_passed{};
     std::string source_device_create_error;
     uint32_t queue_family = UINT32_MAX;
     uint32_t first_pixel[4]{};
@@ -100,7 +101,8 @@ const char* Verdict(const Results& r) {
                           r.source_required_features_present && r.source_required_device_create_succeeded &&
                           r.device_created && r.source_queue_supports_present &&
                           r.swapchain_image_presented && r.push_descriptor_compute_passed &&
-                          r.offscreen_clear_readback_passed;
+                          r.offscreen_clear_readback_passed &&
+                          r.bda_page_table_indirection_passed;
     if (required && r.image_alias_readback_passed && r.view_reinterpretation_created &&
         r.source_optional_feature_requests_valid) return "PASS";
     return r.device_created ? "PARTIAL" : "FAIL";
@@ -191,6 +193,8 @@ void WriteJson(const Results& r, const std::string& output_path) {
         << Bool(r.image_alias_readback_passed)
         << ",\n  \"view_reinterpretation_created\": "
         << Bool(r.view_reinterpretation_created)
+        << ",\n  \"bda_page_table_indirection_and_gpu_writeback_passed\": "
+        << Bool(r.bda_page_table_indirection_passed)
         << ",\n  \"first_pixel_rgba\": [" << r.first_pixel[0] << ", "
         << r.first_pixel[1] << ", " << r.first_pixel[2] << ", "
         << r.first_pixel[3] << "],\n";
@@ -286,8 +290,8 @@ uint32_t FindMemoryType(VkPhysicalDevice physical, uint32_t type_bits,
     return fallback;
 }
 
-std::vector<uint32_t> ReadShader() {
-    std::ifstream file(GOW3_PROBE_SHADER_PATH, std::ios::binary | std::ios::ate);
+std::vector<uint32_t> ReadShader(const char* path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) return {};
     const auto size = file.tellg();
     if (size <= 0 || (size % 4) != 0) return {};
@@ -405,7 +409,7 @@ bool RunPushDescriptorCompute(VkPhysicalDevice physical, VkDevice device,
         };
         result = vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &pipeline_layout);
         if (result != VK_SUCCESS) { fail("create pipeline layout", result); break; }
-        const auto code = ReadShader();
+        const auto code = ReadShader(GOW3_PROBE_SHADER_PATH);
         if (code.empty()) { error = "could not read compiled compute shader"; break; }
         const VkShaderModuleCreateInfo shader_info{
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -566,6 +570,304 @@ bool RunPushDescriptorCompute(VkPhysicalDevice physical, VkDevice device,
     DestroyImage(device, storage_image);
     if (buffer) vkDestroyBuffer(device, buffer, nullptr);
     if (memory) vkFreeMemory(device, memory, nullptr);
+    return passed;
+}
+
+struct MappedBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize size{};
+    VkDeviceSize allocation_size{};
+    VkDeviceAddress address{};
+    void* mapped{};
+    bool coherent{};
+};
+
+void DestroyMappedBuffer(VkDevice device, MappedBuffer& resource) {
+    if (resource.mapped) vkUnmapMemory(device, resource.memory);
+    if (resource.buffer) vkDestroyBuffer(device, resource.buffer, nullptr);
+    if (resource.memory) vkFreeMemory(device, resource.memory, nullptr);
+    resource = {};
+}
+
+bool CreateMappedBuffer(VkPhysicalDevice physical, VkDevice device, VkDeviceSize size,
+                        VkBufferUsageFlags usage, bool with_bda, MappedBuffer& out,
+                        std::string& error) {
+    const VkBufferCreateInfo buffer_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = usage | (with_bda ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0),
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VkResult result = vkCreateBuffer(device, &buffer_info, nullptr, &out.buffer);
+    if (result != VK_SUCCESS) {
+        error = "create BDA test buffer: " + ResultName(result);
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device, out.buffer, &requirements);
+    const uint32_t type = FindMemoryType(physical, requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (type == UINT32_MAX) {
+        error = "no host-visible memory type for BDA indirection test";
+        return false;
+    }
+    const VkMemoryAllocateFlagsInfo address_flags{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+        .flags = with_bda ? VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT : VkMemoryAllocateFlags{0},
+    };
+    const VkMemoryAllocateInfo allocation{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = with_bda ? &address_flags : nullptr,
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = type,
+    };
+    result = vkAllocateMemory(device, &allocation, nullptr, &out.memory);
+    if (result != VK_SUCCESS) {
+        error = "allocate BDA test buffer memory: " + ResultName(result);
+        return false;
+    }
+    out.size = size;
+    out.allocation_size = requirements.size;
+    result = vkBindBufferMemory(device, out.buffer, out.memory, 0);
+    if (result != VK_SUCCESS) {
+        error = "bind BDA test buffer: " + ResultName(result);
+        return false;
+    }
+    result = vkMapMemory(device, out.memory, 0, VK_WHOLE_SIZE, 0, &out.mapped);
+    if (result != VK_SUCCESS) {
+        error = "map BDA test buffer: " + ResultName(result);
+        return false;
+    }
+    VkPhysicalDeviceMemoryProperties properties{};
+    vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+    out.coherent = (properties.memoryTypes[type].propertyFlags &
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    if (with_bda) {
+        const VkBufferDeviceAddressInfo address_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+            .buffer = out.buffer,
+        };
+        out.address = vkGetBufferDeviceAddress(device, &address_info);
+        if (out.address == 0) {
+            error = "vkGetBufferDeviceAddress returned zero for a resident range";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SyncMappedBuffer(VkDevice device, const MappedBuffer& resource, bool invalidate,
+                      std::string& error) {
+    if (resource.coherent) return true;
+    const VkMappedMemoryRange range{
+        .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        .memory = resource.memory,
+        .offset = 0,
+        .size = VK_WHOLE_SIZE,
+    };
+    const VkResult result = invalidate
+        ? vkInvalidateMappedMemoryRanges(device, 1, &range)
+        : vkFlushMappedMemoryRanges(device, 1, &range);
+    if (result != VK_SUCCESS) {
+        error = std::string(invalidate ? "invalidate" : "flush") +
+                " BDA test memory: " + ResultName(result);
+        return false;
+    }
+    return true;
+}
+
+bool RunBdaPageTableIndirection(VkPhysicalDevice physical, VkDevice device, VkQueue queue,
+                                uint32_t family, bool enabled, std::string& error) {
+    if (!enabled) {
+        error = "requires bufferDeviceAddress and shaderInt64";
+        return false;
+    }
+    constexpr VkDeviceSize PageBytes = 16 * 1024;
+    MappedBuffer page_a{}, page_b{}, page_table{};
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    VkShaderModule shader = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkCommandPool command_pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    bool passed = false;
+
+    do {
+        const VkBufferUsageFlags page_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (!CreateMappedBuffer(physical, device, PageBytes, page_usage, true, page_a, error) ||
+            !CreateMappedBuffer(physical, device, PageBytes, page_usage, true, page_b, error) ||
+            !CreateMappedBuffer(physical, device, 2 * sizeof(VkDeviceAddress),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, page_table, error)) {
+            break;
+        }
+        auto* a = static_cast<uint32_t*>(page_a.mapped);
+        auto* b = static_cast<uint32_t*>(page_b.mapped);
+        auto* table = static_cast<VkDeviceAddress*>(page_table.mapped);
+        std::memset(a, 0, PageBytes);
+        std::memset(b, 0, PageBytes);
+        a[0] = 0x12345678u;
+        b[1] = 0x89abcdefu;
+        table[0] = page_a.address;
+        table[1] = page_b.address;
+        if (!SyncMappedBuffer(device, page_a, false, error) ||
+            !SyncMappedBuffer(device, page_b, false, error) ||
+            !SyncMappedBuffer(device, page_table, false, error)) {
+            break;
+        }
+
+        const VkDescriptorSetLayoutBinding binding{
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        };
+        const VkDescriptorSetLayoutCreateInfo set_info{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 1,
+            .pBindings = &binding,
+        };
+        VkResult result = vkCreateDescriptorSetLayout(device, &set_info, nullptr, &set_layout);
+        if (result != VK_SUCCESS) { error = "create BDA descriptor layout: " + ResultName(result); break; }
+        const VkPipelineLayoutCreateInfo layout_info{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &set_layout,
+        };
+        result = vkCreatePipelineLayout(device, &layout_info, nullptr, &pipeline_layout);
+        if (result != VK_SUCCESS) { error = "create BDA pipeline layout: " + ResultName(result); break; }
+
+        const auto code = ReadShader(GOW3_PROBE_BDA_SHADER_PATH);
+        if (code.empty()) { error = "could not read compiled BDA indirection shader"; break; }
+        const VkShaderModuleCreateInfo shader_info{
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = code.size() * sizeof(uint32_t),
+            .pCode = code.data(),
+        };
+        result = vkCreateShaderModule(device, &shader_info, nullptr, &shader);
+        if (result != VK_SUCCESS) { error = "create BDA shader module: " + ResultName(result); break; }
+        const VkPipelineShaderStageCreateInfo stage{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = shader,
+            .pName = "main",
+        };
+        const VkComputePipelineCreateInfo pipeline_info{
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = stage,
+            .layout = pipeline_layout,
+        };
+        result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline);
+        if (result != VK_SUCCESS) { error = "create BDA compute pipeline: " + ResultName(result); break; }
+
+        const VkDescriptorPoolSize pool_size{
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+        };
+        const VkDescriptorPoolCreateInfo pool_info{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .maxSets = 1,
+            .poolSizeCount = 1,
+            .pPoolSizes = &pool_size,
+        };
+        result = vkCreateDescriptorPool(device, &pool_info, nullptr, &descriptor_pool);
+        if (result != VK_SUCCESS) { error = "create BDA descriptor pool: " + ResultName(result); break; }
+        const VkDescriptorSetAllocateInfo set_alloc{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = descriptor_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &set_layout,
+        };
+        result = vkAllocateDescriptorSets(device, &set_alloc, &descriptor_set);
+        if (result != VK_SUCCESS) { error = "allocate BDA descriptor set: " + ResultName(result); break; }
+        const VkDescriptorBufferInfo table_info{page_table.buffer, 0, page_table.size};
+        const VkWriteDescriptorSet write{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = descriptor_set,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &table_info,
+        };
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+
+        const VkCommandPoolCreateInfo command_pool_info{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .queueFamilyIndex = family,
+        };
+        result = vkCreateCommandPool(device, &command_pool_info, nullptr, &command_pool);
+        if (result != VK_SUCCESS) { error = "create BDA command pool: " + ResultName(result); break; }
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        const VkCommandBufferAllocateInfo command_alloc{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = command_pool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        result = vkAllocateCommandBuffers(device, &command_alloc, &command);
+        if (result != VK_SUCCESS) { error = "allocate BDA command buffer: " + ResultName(result); break; }
+        const VkCommandBufferBeginInfo begin{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        };
+        result = vkBeginCommandBuffer(command, &begin);
+        if (result != VK_SUCCESS) { error = "begin BDA command buffer: " + ResultName(result); break; }
+        const VkMemoryBarrier before{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_HOST_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        };
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &before, 0, nullptr, 0, nullptr);
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout,
+            0, 1, &descriptor_set, 0, nullptr);
+        vkCmdDispatch(command, 1, 1, 1);
+        const VkMemoryBarrier after{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+        };
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+        result = vkEndCommandBuffer(command);
+        if (result != VK_SUCCESS) { error = "end BDA command buffer: " + ResultName(result); break; }
+        const VkFenceCreateInfo fence_info{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        result = vkCreateFence(device, &fence_info, nullptr, &fence);
+        if (result != VK_SUCCESS) { error = "create BDA fence: " + ResultName(result); break; }
+        const VkSubmitInfo submit{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command,
+        };
+        result = vkQueueSubmit(queue, 1, &submit, fence);
+        if (result != VK_SUCCESS) { error = "submit BDA indirection workload: " + ResultName(result); break; }
+        result = vkWaitForFences(device, 1, &fence, VK_TRUE, 5000000000ULL);
+        if (result != VK_SUCCESS) { error = "wait for BDA indirection workload: " + ResultName(result); break; }
+        if (!SyncMappedBuffer(device, page_a, true, error) ||
+            !SyncMappedBuffer(device, page_b, true, error)) {
+            break;
+        }
+        passed = a[2] == (0x12345678u ^ 0xa55a3cc3u) &&
+                 b[3] == (0x89abcdefu ^ 0x5aa5c33cu);
+        if (!passed) {
+            error = "GPU BDA writeback mismatch: page A=" + std::to_string(a[2]) +
+                    ", page B=" + std::to_string(b[3]);
+        }
+    } while (false);
+
+    if (fence) vkDestroyFence(device, fence, nullptr);
+    if (command_pool) vkDestroyCommandPool(device, command_pool, nullptr);
+    if (descriptor_pool) vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
+    if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
+    if (shader) vkDestroyShaderModule(device, shader, nullptr);
+    if (pipeline_layout) vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
+    if (set_layout) vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
+    DestroyMappedBuffer(device, page_table);
+    DestroyMappedBuffer(device, page_b);
+    DestroyMappedBuffer(device, page_a);
     return passed;
 }
 
@@ -1425,8 +1727,15 @@ int main(int argc, char** argv) {
                     .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES,
                     .vertexAttributeInstanceRateDivisor = divisor.vertexAttributeInstanceRateDivisor,
                 };
+                VkPhysicalDeviceVulkan12Features diagnostic_v12{
+                    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+                    .bufferDeviceAddress = f12.bufferDeviceAddress,
+                };
                 VkPhysicalDeviceFeatures2 diagnostic_features{
                     .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                    .features{
+                        .shaderInt64 = core.features.shaderInt64,
+                    },
                 };
                 void** tail = &diagnostic_features.pNext;
                 if (results.extensions[VK_EXT_ROBUSTNESS_2_EXTENSION_NAME]) {
@@ -1435,7 +1744,9 @@ int main(int argc, char** argv) {
                 }
                 if (results.extensions[VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME]) {
                     *tail = &diagnostic_divisor;
+                    tail = &diagnostic_divisor.pNext;
                 }
+                *tail = &diagnostic_v12;
                 const VkDeviceCreateInfo diagnostic_info{
                     .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                     .pNext = &diagnostic_features,
@@ -1468,6 +1779,14 @@ int main(int argc, char** argv) {
                 physical, device, queue, results.queue_family, workload_error);
             SetWorkload(results, "push_descriptor_compute_storage_image_host_readback",
                 results.push_descriptor_compute_passed, workload_error);
+        }
+        {
+            std::string workload_error;
+            results.bda_page_table_indirection_passed = RunBdaPageTableIndirection(
+                physical, device, queue, results.queue_family,
+                f12.bufferDeviceAddress && core.features.shaderInt64, workload_error);
+            SetWorkload(results, "bda_page_table_indirection_and_gpu_writeback",
+                results.bda_page_table_indirection_passed, workload_error);
         }
         {
             std::string workload_error;

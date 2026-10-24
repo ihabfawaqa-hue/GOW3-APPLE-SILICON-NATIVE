@@ -1,0 +1,21 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer PageTable {
+    uint64_t page_address[];
+} page_table;
+
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer GuestPage {
+    uint word[];
+};
+
+void main() {
+    GuestPage page_a = GuestPage(page_table.page_address[0]);
+    GuestPage page_b = GuestPage(page_table.page_address[1]);
+    page_a.word[2] = page_a.word[0] ^ 0xa55a3cc3u;
+    page_b.word[3] = page_b.word[1] ^ 0x5aa5c33cu;
+}

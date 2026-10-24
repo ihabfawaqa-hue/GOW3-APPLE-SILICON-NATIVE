@@ -326,8 +326,15 @@ bool MemoryManager::HashSparseMemory(VAddr source, u64 size, u64 seed, u64& hash
 bool MemoryManager::TryWriteBacking(VAddr guest_address, const void* data, u64 size) {
     Gow3WriteLog::Note(guest_address, data, size, Gow3WriteLog::Backing);
     Gow3GpuGuestMemoryApi api{};
-    return GetGuestMemoryApi(api) &&
-           api.writeback(api.user_context, guest_address, data, size) != 0;
+    const bool written = GetGuestMemoryApi(api) &&
+                         api.writeback(api.user_context, guest_address, data, size) != 0;
+    // Upstream a101edb (#331): the write skipped page tracking unless it happened to fault,
+    // so textures over it must reload. Fence and label writes (<= 8 bytes) never hold texels;
+    // noting them would send every texture binding through the locked path.
+    if (written && rasterizer && size > 8) {
+        rasterizer->GetTextureCache().NoteBackingWrite(guest_address, size);
+    }
+    return written;
 }
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
     Gow3Stats::Timer timer{Gow3Stats::t_protect};

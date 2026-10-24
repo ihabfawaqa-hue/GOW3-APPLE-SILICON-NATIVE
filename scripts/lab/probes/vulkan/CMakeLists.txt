@@ -24,10 +24,20 @@ add_custom_command(
     VERBATIM)
 add_custom_target(probe_bda_shader DEPENDS "${BDA_SPIRV_OUT}")
 
+set(ALIAS_SPIRV_OUT "${CMAKE_CURRENT_BINARY_DIR}/direct_alias.comp.spv")
+add_custom_command(
+    OUTPUT "${ALIAS_SPIRV_OUT}"
+    COMMAND "${GLSLANG_VALIDATOR}" --target-env vulkan1.3 -V
+            "${CMAKE_CURRENT_SOURCE_DIR}/direct_alias.comp" -o "${ALIAS_SPIRV_OUT}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/direct_alias.comp"
+    VERBATIM)
+add_custom_target(probe_alias_shader DEPENDS "${ALIAS_SPIRV_OUT}")
+
 add_executable(gow3-vulkan-probe vulkan_probe.cpp)
-add_dependencies(gow3-vulkan-probe probe_shader probe_bda_shader)
+add_dependencies(gow3-vulkan-probe probe_shader probe_bda_shader probe_alias_shader)
 target_compile_features(gow3-vulkan-probe PRIVATE cxx_std_20)
 target_compile_definitions(gow3-vulkan-probe PRIVATE
     GOW3_PROBE_SHADER_PATH="${SPIRV_OUT}"
-    GOW3_PROBE_BDA_SHADER_PATH="${BDA_SPIRV_OUT}")
+    GOW3_PROBE_BDA_SHADER_PATH="${BDA_SPIRV_OUT}"
+    GOW3_PROBE_ALIAS_SHADER_PATH="${ALIAS_SPIRV_OUT}")
 target_link_libraries(gow3-vulkan-probe PRIVATE Vulkan::Vulkan PkgConfig::SDL3)

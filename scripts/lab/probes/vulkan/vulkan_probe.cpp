@@ -57,6 +57,7 @@ struct Results {
     bool image_alias_readback_passed{};
     bool view_reinterpretation_created{};
     bool bda_page_table_indirection_passed{};
+    bool non_sparse_direct_buffer_alias_passed{};
     std::string source_device_create_error;
     uint32_t queue_family = UINT32_MAX;
     uint32_t first_pixel[4]{};
@@ -195,6 +196,8 @@ void WriteJson(const Results& r, const std::string& output_path) {
         << Bool(r.view_reinterpretation_created)
         << ",\n  \"bda_page_table_indirection_and_gpu_writeback_passed\": "
         << Bool(r.bda_page_table_indirection_passed)
+        << ",\n  \"non_sparse_direct_buffer_alias_and_gpu_writeback_passed\": "
+        << Bool(r.non_sparse_direct_buffer_alias_passed)
         << ",\n  \"first_pixel_rgba\": [" << r.first_pixel[0] << ", "
         << r.first_pixel[1] << ", " << r.first_pixel[2] << ", "
         << r.first_pixel[3] << "],\n";
@@ -677,6 +680,114 @@ bool SyncMappedBuffer(VkDevice device, const MappedBuffer& resource, bool invali
     return true;
 }
 
+struct MappedAliasedBuffers {
+    VkBuffer first = VK_NULL_HANDLE;
+    VkBuffer second = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize allocation_size{};
+    void* mapped{};
+    bool coherent{};
+};
+
+void DestroyMappedAliasedBuffers(VkDevice device, MappedAliasedBuffers& resources) {
+    if (resources.mapped) vkUnmapMemory(device, resources.memory);
+    if (resources.first) vkDestroyBuffer(device, resources.first, nullptr);
+    if (resources.second) vkDestroyBuffer(device, resources.second, nullptr);
+    if (resources.memory) vkFreeMemory(device, resources.memory, nullptr);
+    resources = {};
+}
+
+bool CreateMappedAliasedBuffers(VkPhysicalDevice physical, VkDevice device,
+                                VkDeviceSize buffer_size, VkDeviceSize alias_offset,
+                                VkBufferUsageFlags usage, MappedAliasedBuffers& out,
+                                std::string& error) {
+    const VkBufferCreateInfo buffer_info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = buffer_size,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VkResult result = vkCreateBuffer(device, &buffer_info, nullptr, &out.first);
+    if (result != VK_SUCCESS) {
+        error = "create first aliased buffer: " + ResultName(result);
+        return false;
+    }
+    result = vkCreateBuffer(device, &buffer_info, nullptr, &out.second);
+    if (result != VK_SUCCESS) {
+        error = "create second aliased buffer: " + ResultName(result);
+        return false;
+    }
+    VkMemoryRequirements first_requirements{};
+    VkMemoryRequirements second_requirements{};
+    vkGetBufferMemoryRequirements(device, out.first, &first_requirements);
+    vkGetBufferMemoryRequirements(device, out.second, &second_requirements);
+    if (alias_offset % first_requirements.alignment != 0 ||
+        alias_offset % second_requirements.alignment != 0) {
+        error = "alias offset does not satisfy buffer memory binding alignment";
+        return false;
+    }
+    const uint32_t compatible_types = first_requirements.memoryTypeBits &
+                                      second_requirements.memoryTypeBits;
+    const uint32_t memory_type = FindMemoryType(physical, compatible_types,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memory_type == UINT32_MAX) {
+        error = "no shared host-visible memory type for aliased buffers";
+        return false;
+    }
+    out.allocation_size = std::max(first_requirements.size,
+                                   alias_offset + second_requirements.size);
+    const VkMemoryAllocateInfo allocation{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = out.allocation_size,
+        .memoryTypeIndex = memory_type,
+    };
+    result = vkAllocateMemory(device, &allocation, nullptr, &out.memory);
+    if (result != VK_SUCCESS) {
+        error = "allocate shared alias memory: " + ResultName(result);
+        return false;
+    }
+    result = vkBindBufferMemory(device, out.first, out.memory, 0);
+    if (result != VK_SUCCESS) {
+        error = "bind first aliased buffer: " + ResultName(result);
+        return false;
+    }
+    result = vkBindBufferMemory(device, out.second, out.memory, alias_offset);
+    if (result != VK_SUCCESS) {
+        error = "bind second aliased buffer: " + ResultName(result);
+        return false;
+    }
+    result = vkMapMemory(device, out.memory, 0, VK_WHOLE_SIZE, 0, &out.mapped);
+    if (result != VK_SUCCESS) {
+        error = "map shared alias memory: " + ResultName(result);
+        return false;
+    }
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
+    out.coherent = (memory_properties.memoryTypes[memory_type].propertyFlags &
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    return true;
+}
+
+bool SyncMappedAliasedBuffers(VkDevice device, const MappedAliasedBuffers& resources,
+                              bool invalidate, std::string& error) {
+    if (resources.coherent) return true;
+    const VkMappedMemoryRange range{
+        .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        .memory = resources.memory,
+        .offset = 0,
+        .size = VK_WHOLE_SIZE,
+    };
+    const VkResult result = invalidate
+        ? vkInvalidateMappedMemoryRanges(device, 1, &range)
+        : vkFlushMappedMemoryRanges(device, 1, &range);
+    if (result != VK_SUCCESS) {
+        error = std::string(invalidate ? "invalidate" : "flush") +
+                " aliased buffer memory: " + ResultName(result);
+        return false;
+    }
+    return true;
+}
+
 bool RunBdaPageTableIndirection(VkPhysicalDevice physical, VkDevice device, VkQueue queue,
                                 uint32_t family, bool enabled, std::string& error) {
     if (!enabled) {
@@ -868,6 +979,243 @@ bool RunBdaPageTableIndirection(VkPhysicalDevice physical, VkDevice device, VkQu
     DestroyMappedBuffer(device, page_table);
     DestroyMappedBuffer(device, page_b);
     DestroyMappedBuffer(device, page_a);
+    return passed;
+}
+
+bool RunNonSparseDirectBufferAlias(VkPhysicalDevice physical, VkDevice device, VkQueue queue,
+                                   uint32_t family, std::string& error) {
+    constexpr VkDeviceSize PageBytes = 64 * 1024;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(physical, &properties);
+    const VkDeviceSize alignment = std::max<VkDeviceSize>(
+        1, properties.limits.minStorageBufferOffsetAlignment);
+    if (PageBytes % alignment != 0) {
+        error = "64 KiB test page does not satisfy minStorageBufferOffsetAlignment=" +
+                std::to_string(alignment);
+        return false;
+    }
+
+    MappedAliasedBuffers alias{};
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+    VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    VkShaderModule shader = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkCommandPool command_pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    bool passed = false;
+
+    do {
+        const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (!CreateMappedAliasedBuffers(physical, device, 2 * PageBytes, PageBytes,
+                                        usage, alias, error)) {
+            break;
+        }
+        std::memset(alias.mapped, 0, static_cast<size_t>(alias.allocation_size));
+        if (!SyncMappedAliasedBuffers(device, alias, false, error)) {
+            break;
+        }
+
+        const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
+            {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+             .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+            {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+             .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+        }};
+        const VkDescriptorSetLayoutCreateInfo set_info{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = static_cast<uint32_t>(bindings.size()),
+            .pBindings = bindings.data(),
+        };
+        VkResult result = vkCreateDescriptorSetLayout(device, &set_info, nullptr, &set_layout);
+        if (result != VK_SUCCESS) {
+            error = "create non-sparse alias descriptor layout: " + ResultName(result);
+            break;
+        }
+        const VkPipelineLayoutCreateInfo layout_info{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &set_layout,
+        };
+        result = vkCreatePipelineLayout(device, &layout_info, nullptr, &pipeline_layout);
+        if (result != VK_SUCCESS) {
+            error = "create non-sparse alias pipeline layout: " + ResultName(result);
+            break;
+        }
+        const auto code = ReadShader(GOW3_PROBE_ALIAS_SHADER_PATH);
+        if (code.empty()) {
+            error = "could not read compiled non-sparse alias shader";
+            break;
+        }
+        const VkShaderModuleCreateInfo shader_info{
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = code.size() * sizeof(uint32_t),
+            .pCode = code.data(),
+        };
+        result = vkCreateShaderModule(device, &shader_info, nullptr, &shader);
+        if (result != VK_SUCCESS) {
+            error = "create non-sparse alias shader module: " + ResultName(result);
+            break;
+        }
+        const VkPipelineShaderStageCreateInfo stage{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = shader,
+            .pName = "main",
+        };
+        const VkComputePipelineCreateInfo pipeline_info{
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = stage,
+            .layout = pipeline_layout,
+        };
+        result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr,
+                                          &pipeline);
+        if (result != VK_SUCCESS) {
+            error = "create non-sparse alias compute pipeline: " + ResultName(result);
+            break;
+        }
+
+        const VkDescriptorPoolSize pool_size{
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 2,
+        };
+        const VkDescriptorPoolCreateInfo pool_info{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .maxSets = 1,
+            .poolSizeCount = 1,
+            .pPoolSizes = &pool_size,
+        };
+        result = vkCreateDescriptorPool(device, &pool_info, nullptr, &descriptor_pool);
+        if (result != VK_SUCCESS) {
+            error = "create non-sparse alias descriptor pool: " + ResultName(result);
+            break;
+        }
+        const VkDescriptorSetAllocateInfo set_alloc{
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = descriptor_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &set_layout,
+        };
+        result = vkAllocateDescriptorSets(device, &set_alloc, &descriptor_set);
+        if (result != VK_SUCCESS) {
+            error = "allocate non-sparse alias descriptor set: " + ResultName(result);
+            break;
+        }
+        const std::array<VkDescriptorBufferInfo, 2> buffer_infos{{
+            {alias.first, 0, 2 * PageBytes},
+            {alias.second, 0, 2 * PageBytes},
+        }};
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        for (uint32_t i = 0; i < writes.size(); ++i) {
+            writes[i] = VkWriteDescriptorSet{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptor_set,
+                .dstBinding = i,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &buffer_infos[i],
+            };
+        }
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(),
+                               0, nullptr);
+
+        const VkCommandPoolCreateInfo command_pool_info{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .queueFamilyIndex = family,
+        };
+        result = vkCreateCommandPool(device, &command_pool_info, nullptr, &command_pool);
+        if (result != VK_SUCCESS) {
+            error = "create non-sparse alias command pool: " + ResultName(result);
+            break;
+        }
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        const VkCommandBufferAllocateInfo command_alloc{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = command_pool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        result = vkAllocateCommandBuffers(device, &command_alloc, &command);
+        if (result != VK_SUCCESS) {
+            error = "allocate non-sparse alias command buffer: " + ResultName(result);
+            break;
+        }
+        const VkCommandBufferBeginInfo begin{
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        };
+        result = vkBeginCommandBuffer(command, &begin);
+        if (result != VK_SUCCESS) {
+            error = "begin non-sparse alias command buffer: " + ResultName(result);
+            break;
+        }
+        const VkMemoryBarrier before{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_HOST_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        };
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout,
+            0, 1, &descriptor_set, 0, nullptr);
+        vkCmdDispatch(command, 1, 1, 1);
+        const VkMemoryBarrier after{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+        };
+        vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+        result = vkEndCommandBuffer(command);
+        if (result != VK_SUCCESS) {
+            error = "end non-sparse alias command buffer: " + ResultName(result);
+            break;
+        }
+        const VkFenceCreateInfo fence_info{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        result = vkCreateFence(device, &fence_info, nullptr, &fence);
+        if (result != VK_SUCCESS) {
+            error = "create non-sparse alias fence: " + ResultName(result);
+            break;
+        }
+        const VkSubmitInfo submit{
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command,
+        };
+        result = vkQueueSubmit(queue, 1, &submit, fence);
+        if (result != VK_SUCCESS) {
+            error = "submit non-sparse alias workload: " + ResultName(result);
+            break;
+        }
+        result = vkWaitForFences(device, 1, &fence, VK_TRUE, 5000000000ULL);
+        if (result != VK_SUCCESS) {
+            error = "wait for non-sparse alias workload: " + ResultName(result);
+            break;
+        }
+        if (!SyncMappedAliasedBuffers(device, alias, true, error)) {
+            break;
+        }
+        const auto* words = static_cast<const uint32_t*>(alias.mapped);
+        const size_t shared_word = static_cast<size_t>(PageBytes / sizeof(uint32_t));
+        const uint32_t expected = 0x47573321u ^ 0x5aa5c33cu;
+        passed = words[shared_word] == 0x47573321u && words[shared_word + 1] == expected;
+        if (!passed) {
+            error = "overlapping descriptor read/write mismatch: shared=" +
+                    std::to_string(words[shared_word]) + ", writeback=" +
+                    std::to_string(words[shared_word + 1]);
+        }
+    } while (false);
+
+    if (fence) vkDestroyFence(device, fence, nullptr);
+    if (command_pool) vkDestroyCommandPool(device, command_pool, nullptr);
+    if (descriptor_pool) vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
+    if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
+    if (shader) vkDestroyShaderModule(device, shader, nullptr);
+    if (pipeline_layout) vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
+    if (set_layout) vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
+    DestroyMappedAliasedBuffers(device, alias);
     return passed;
 }
 
@@ -1787,6 +2135,13 @@ int main(int argc, char** argv) {
                 f12.bufferDeviceAddress && core.features.shaderInt64, workload_error);
             SetWorkload(results, "bda_page_table_indirection_and_gpu_writeback",
                 results.bda_page_table_indirection_passed, workload_error);
+        }
+        {
+            std::string workload_error;
+            results.non_sparse_direct_buffer_alias_passed = RunNonSparseDirectBufferAlias(
+                physical, device, queue, results.queue_family, workload_error);
+            SetWorkload(results, "non_sparse_direct_buffer_alias_and_gpu_writeback",
+                results.non_sparse_direct_buffer_alias_passed, workload_error);
         }
         {
             std::string workload_error;

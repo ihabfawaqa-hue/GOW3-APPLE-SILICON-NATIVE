@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) coherent buffer FirstRange {
+    uint words[];
+} first_range;
+layout(set = 0, binding = 1, std430) coherent buffer OverlappingRange {
+    uint words[];
+} overlapping_range;
+
+void main() {
+    // The second page of FirstRange and first page of OverlappingRange refer to the
+    // same bytes through separate ordinary VkBuffer objects bound to overlapping
+    // ranges of one VkDeviceMemory allocation.
+    first_range.words[16384] = 0x47573321u;
+    memoryBarrierBuffer();
+    uint observed = overlapping_range.words[0];
+    overlapping_range.words[1] = observed ^ 0x5aa5c33cu;
+}

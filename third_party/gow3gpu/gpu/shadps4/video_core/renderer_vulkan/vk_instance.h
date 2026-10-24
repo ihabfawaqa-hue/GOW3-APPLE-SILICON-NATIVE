@@ -58,6 +58,12 @@ public:
         return vk13_props.maxBufferSize;
     }
 
+    /// Sparse guest-memory arenas are optional; BufferCache supplies a resident-range path
+    /// when either sparse buffer feature is unavailable.
+    bool SupportsSparseBufferResidency() const {
+        return features.sparseBinding && features.sparseResidencyBuffer;
+    }
+
     vk::PhysicalDevice GetPhysicalDevice() const {
         return physical_device;
     }

@@ -6,6 +6,7 @@
 #include "gow3_copy.h"
 
 #include <deque>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -75,7 +76,7 @@ public:
         return stream_buffer;
     }
 
-    /// Returns minimum granularity of a sparse memory bind.
+    /// Returns the guest-memory block shift used by the GPU BDA page table.
     u32 GetSparsePageShift() const noexcept {
         return block_shift;
     }
@@ -128,6 +129,12 @@ private:
 
     const Buffer* GetArena(u64 first_block, u64 last_block);
 
+    /// Creates or grows an ordinary, physically backed buffer for a contiguous guest range.
+    const Buffer* GetDenseArena(u64 first_block, u64 last_block);
+
+    /// Publishes each guest block's BDA into the shader page table.
+    void UpdateDenseBdaPageTable(const Buffer* buffer, u64 first_block, u64 end_block);
+
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
@@ -174,6 +181,13 @@ private:
     std::deque<Buffer> arenas;
     std::vector<ArenaBinds> pending_binds;
     Vulkan::Semaphore memory_semaphore;
+
+    struct DenseArena {
+        u64 start_block{};
+        u64 end_block{};
+        std::unique_ptr<Buffer> buffer;
+    };
+    std::vector<std::unique_ptr<DenseArena>> dense_arenas;
 
     struct Backing : public Interval {
         vk::DeviceMemory memory;

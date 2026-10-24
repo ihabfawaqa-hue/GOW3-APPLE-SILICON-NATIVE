@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -172,7 +173,26 @@ void Swapchain::FindPresentFormat() {
     if (formats[0].format == vk::Format::eUndefined) {
         surface_format.format = vk::Format::eR8G8B8A8Unorm;
         surface_format.colorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
+        std::fprintf(stderr, "[gow3gpu-vk] swapchain selected surface format=%s\n",
+                     vk::to_string(surface_format.format).c_str());
         return;
+    }
+
+    const char* force_rgba_env = std::getenv("GOW3_FORCE_RGBA_SWAPCHAIN");
+    const bool force_rgba = force_rgba_env && force_rgba_env[0] == '1';
+    if (force_rgba) {
+        const auto rgba = std::find_if(formats.begin(), formats.end(), [](const auto& format) {
+            return format.format == vk::Format::eR8G8B8A8Unorm;
+        });
+        if (rgba != formats.end()) {
+            surface_format = *rgba;
+            std::fprintf(stderr,
+                         "[gow3gpu-vk] swapchain selected surface format=%s (RGBA diagnostic)\n",
+                         vk::to_string(surface_format.format).c_str());
+            return;
+        }
+        std::fprintf(stderr,
+                     "[gow3gpu-vk] RGBA diagnostic requested but R8G8B8A8_UNORM is unavailable\n");
     }
 
     // Try to find a suitable format.
@@ -184,6 +204,8 @@ void Swapchain::FindPresentFormat() {
 
         surface_format.format = format;
         surface_format.colorSpace = sformat.colorSpace;
+        std::fprintf(stderr, "[gow3gpu-vk] swapchain selected surface format=%s\n",
+                     vk::to_string(surface_format.format).c_str());
         return;
     }
 

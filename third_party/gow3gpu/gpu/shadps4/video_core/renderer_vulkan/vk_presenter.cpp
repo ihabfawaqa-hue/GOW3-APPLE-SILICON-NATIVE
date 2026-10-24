@@ -349,7 +349,7 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 // gow3: raw copy of an image for GOW3_FRAME_DUMP_TRIGGER, written once the GPU is done.
 static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
                     vk::Image image, vk::ImageLayout layout, u32 w, u32 h, const char* name,
-                    int index) {
+                    int index, vk::Format format) {
     const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                        .size = VkDeviceSize(w) * h * 4,
                                        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
@@ -368,8 +368,11 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
                                                  .imageExtent = {w, h, 1}});
     const char* dir = std::getenv("GOW3_DUMP_DIR");
     char path[512];
-    std::snprintf(path, sizeof(path), "%s/%s_%03d_%ux%u.raw", dir && *dir ? dir : "out/dump", name,
-                  index, w, h);
+    char filename[256];
+    std::snprintf(filename, sizeof(filename), "%s_%03d_%ux%u.raw", name, index, w, h);
+    std::snprintf(path, sizeof(path), "%s/%s", dir && *dir ? dir : "out/dump", filename);
+    std::fprintf(stderr, "[gow3gpu-frame] raw file=%s format=%s width=%u height=%u\n",
+                 filename, vk::to_string(format).c_str(), w, h);
     scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info,
                                       size = buffer_ci.size, file = std::string{path}] {
         vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
@@ -387,8 +390,23 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // guest display buffer and presented image are written to GOW3_DUMP_DIR (default out/dump)
     // as raw 32-bit pixels (menus and movies included; the upscaler dumps scene frames only).
     static const char* frame_dump_trigger = std::getenv("GOW3_FRAME_DUMP_TRIGGER");
+    static const u32 frame_dump_every = [] {
+        const char* value = std::getenv("GOW3_FRAME_DUMP_EVERY");
+        return value ? static_cast<u32>(std::max(0, std::atoi(value))) : 0u;
+    }();
+    static const u32 frame_dump_max = [] {
+        const char* value = std::getenv("GOW3_FRAME_DUMP_MAX");
+        return value ? static_cast<u32>(std::max(0, std::atoi(value))) : 1u;
+    }();
     static int frame_dump_index = 0;
-    const bool frame_dump = frame_dump_trigger && std::remove(frame_dump_trigger) == 0;
+    static u32 prepare_frame_count = 0;
+    const u32 prepare_index = ++prepare_frame_count;
+    const bool triggered_dump = frame_dump_trigger && std::remove(frame_dump_trigger) == 0;
+    const bool periodic_dump = frame_dump_every &&
+                               prepare_index % frame_dump_every == 0 &&
+                               static_cast<u32>(frame_dump_index) < frame_dump_max;
+    const bool frame_dump = static_cast<u32>(frame_dump_index) < frame_dump_max &&
+                            (triggered_dump || periodic_dump);
     // gow3: scaled upscaler presets: the output-size display buffer drawn by the port.
     TemporalUpscaler::Display display{};
     const bool upscaled = rasterizer->GetUpscaler().DisplayOverride(cpu_address, display);
@@ -465,7 +483,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             runtime.FlushBarriers();
             DumpRaw(instance, draw_scheduler, cmdbuf, image.GetImage(),
                     vk::ImageLayout::eTransferSrcOptimal, image.info.size.width,
-                    image.info.size.height, "display", frame_dump_index);
+                    image.info.size.height, "display", frame_dump_index,
+                    image.info.pixel_format);
         }
         image_view = *image.FindView(view_info).image_view;
         image_size = vk::Extent2D{image.info.size.width, image.info.size.height};
@@ -505,7 +524,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                                       .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
         cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &done});
         DumpRaw(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
-                frame->width, frame->height, "output", frame_dump_index);
+                frame->width, frame->height, "output", frame_dump_index,
+                swapchain.GetSurfaceFormat().format);
         ++frame_dump_index;
     }
 

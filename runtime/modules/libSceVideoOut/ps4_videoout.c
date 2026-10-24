@@ -1,5 +1,15 @@
 #include "ps4_videoout.h"
 #include "ps4_metal_screen.h"
+#include "../../core/gow3gpu_gnm_adapter.h"
+#include "../../core/gow3gpu_runtime_loader.h"
+
+#include <errno.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 __attribute__((weak)) int ps4_gnm_metal_present(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
                           uint32_t tiling_mode, uint32_t pixel_format, void (*on_done)(void *), void *arg) {
@@ -11,14 +21,40 @@ __attribute__((weak)) int ps4_gnm_read_display_cpu(GuestContext *ctx, uint64_t a
     (void)ctx; (void)addr; (void)width; (void)height; (void)pitch; (void)tiling_mode; (void)pixel_format; (void)out_bgra;
     return 0;
 }
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
-#include <errno.h>
-#include <unistd.h>
+
+typedef struct Gow3GpuVideoOutBufferAttribute {
+    uint32_t pixel_format;
+    int32_t tiling_mode;
+    int32_t aspect_ratio;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch_in_pixel;
+    uint32_t option;
+    uint32_t reserved0;
+    uint64_t reserved1;
+} Gow3GpuVideoOutBufferAttribute;
+
+typedef int32_t (*Gow3GpuVideoOutOpenFn)(int32_t, int32_t, int32_t, const void *);
+typedef int32_t (*Gow3GpuVideoOutCloseFn)(int32_t);
+typedef int32_t (*Gow3GpuVideoOutRegisterBuffersFn)(int32_t, int32_t,
+                                                     void *const *, int32_t,
+                                                     const Gow3GpuVideoOutBufferAttribute *);
+typedef int32_t (*Gow3GpuVideoOutUnregisterBuffersFn)(int32_t, int32_t);
+typedef int32_t (*Gow3GpuVideoOutSetFlipRateFn)(int32_t, int32_t);
+typedef int32_t (*Gow3GpuVideoOutSubmitFlipFn)(int32_t, int32_t, int32_t, int64_t);
+
+static int gow3gpu_videoout_active(void) {
+    return ps4_gow3gpu_submission_backend_active();
+}
+
+static uintptr_t gow3gpu_videoout_symbol(const char *nid) {
+    char scoped_nid[96];
+    const int length = snprintf(scoped_nid, sizeof(scoped_nid),
+                                "%s#libSceVideoOut#libSceVideoOut", nid);
+    if (length < 0 || (size_t)length >= sizeof(scoped_nid)) return 0;
+    return ps4_gow3gpu_resolve_candidate(scoped_nid);
+}
 #include <sys/time.h>
-#include <time.h>
 
 #define MAX_VIDEO_HANDLES 8
 #define MAX_FRAME_BUFFERS 16
@@ -155,13 +191,36 @@ int32_t sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index, const vo
     int32_t ret = vh->handle;
     pthread_mutex_unlock(&g_video_table_mutex);
 
-    // Initialize native macOS Metal screen
-    ps4_metal_screen_init(1920, 1080, "PS4Recomp - Native Metal Screen");
+    if (gow3gpu_videoout_active()) {
+        Gow3GpuVideoOutOpenFn candidate_open =
+            (Gow3GpuVideoOutOpenFn)gow3gpu_videoout_symbol("Up36PTk687E");
+        const int32_t candidate_handle = candidate_open
+            ? candidate_open(userId, busType, index, param)
+            : -ENOSYS;
+        if (candidate_handle != ret) {
+            fprintf(stderr,
+                    "[gow3gpu-route] VideoOut open mismatch: primary=%d candidate=%d\n",
+                    ret, candidate_handle);
+            (void)sceVideoOutClose(ret);
+            return candidate_handle < 0 ? candidate_handle : -EIO;
+        }
+        fprintf(stderr,
+                "[gow3gpu-route] VideoOut handle %d opened in shadPS4 Vulkan presenter\n",
+                ret);
+    } else {
+        // The default path remains the native Metal VideoOut implementation.
+        ps4_metal_screen_init(1920, 1080, "PS4Recomp - Native Metal Screen");
+    }
 
     return ret;
 }
 
 int32_t sceVideoOutClose(int32_t handle) {
+    if (gow3gpu_videoout_active()) {
+        Gow3GpuVideoOutCloseFn candidate_close =
+            (Gow3GpuVideoOutCloseFn)gow3gpu_videoout_symbol("uquVH4-Du78");
+        if (candidate_close) (void)candidate_close(handle);
+    }
     pthread_mutex_lock(&g_video_table_mutex);
     VideoOutHandle *vh = find_video_handle_locked(handle);
     if (!vh) {
@@ -210,6 +269,14 @@ void sceVideoOutSetBufferAttribute(OrbisVideoOutBufferAttribute *attr, uint32_t 
 }
 
 int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t startIndex, void * const *bufferArray, int32_t bufferCount, const OrbisVideoOutBufferAttribute *attr) {
+    if (gow3gpu_videoout_active() &&
+        (!bufferArray || !attr || startIndex < 0 || bufferCount < 0 ||
+         startIndex > MAX_FRAME_BUFFERS ||
+         bufferCount > MAX_FRAME_BUFFERS - startIndex)) {
+        fprintf(stderr, "[gow3gpu-route] invalid VideoOut buffer registration\n");
+        return -EINVAL;
+    }
+
     pthread_mutex_lock(&g_video_table_mutex);
     VideoOutHandle *vh = find_video_handle_locked(handle);
     if (!vh) {
@@ -234,7 +301,34 @@ int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t startIndex, void * co
     }
 
     pthread_mutex_unlock(&vh->mutex);
-    return 0;
+    if (!gow3gpu_videoout_active()) return 0;
+    Gow3GpuVideoOutRegisterBuffersFn candidate_register =
+        (Gow3GpuVideoOutRegisterBuffersFn)gow3gpu_videoout_symbol("w3BY+tAEiQY");
+    if (!candidate_register) return -ENOSYS;
+    const Gow3GpuVideoOutBufferAttribute candidate_attr = {
+        .pixel_format = (uint32_t)attr->format,
+        .tiling_mode = attr->tmode,
+        .aspect_ratio = attr->aspect,
+        .width = attr->width,
+        .height = attr->height,
+        .pitch_in_pixel = attr->pixelPitch,
+        .option = 0,
+        .reserved0 = 0,
+        .reserved1 = 0,
+    };
+    const int32_t candidate_result =
+        candidate_register(handle, startIndex, bufferArray, bufferCount,
+                           &candidate_attr);
+    if (candidate_result < 0) {
+        fprintf(stderr,
+                "[gow3gpu-route] candidate VideoOut buffer registration failed: 0x%x\n",
+                (unsigned)candidate_result);
+        return candidate_result;
+    }
+    fprintf(stderr,
+            "[gow3gpu-route] registered %d display buffers in shadPS4 Vulkan VideoOut\n",
+            bufferCount);
+    return candidate_result;
 }
 
 int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t fliprate) {
@@ -248,10 +342,16 @@ int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t fliprate) {
     pthread_mutex_lock(&vh->mutex);
     if (vh->flipRate != fliprate) fprintf(stderr, "[videoout] SetFlipRate(handle=%d, rate=%d)\n", handle, fliprate);
     vh->flipRate = fliprate;
-    ps4_metal_screen_set_guest_flip_rate(fliprate);
     pthread_mutex_unlock(&vh->mutex);
-
     pthread_mutex_unlock(&g_video_table_mutex);
+
+    if (gow3gpu_videoout_active()) {
+        Gow3GpuVideoOutSetFlipRateFn candidate_set_rate =
+            (Gow3GpuVideoOutSetFlipRateFn)gow3gpu_videoout_symbol("CBiu4mCE1DA");
+        return candidate_set_rate ? candidate_set_rate(handle, fliprate) : -ENOSYS;
+    } else {
+        ps4_metal_screen_set_guest_flip_rate(fliprate);
+    }
     return 0;
 }
 
@@ -330,13 +430,31 @@ void ps4_videoout_complete_external_flip(int32_t handle, int32_t bufferIndex,
                                         int64_t flipArg) {
     const PendingFlip completed = {handle, bufferIndex, flipArg};
     finish_flip(&completed);
+    static uint32_t candidate_completions;
+    if ((candidate_completions++ % 120) == 0) {
+        fprintf(stderr,
+                "[gow3gpu-route] candidate Vulkan VideoOut presenter handoff %u (buffer=%d)\n",
+                candidate_completions, bufferIndex);
+    }
+}
+
+static void rollback_flip_pending(int32_t handle) {
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (vh) {
+        pthread_mutex_lock(&vh->mutex);
+        if (vh->flipStatus.numFlipPending > 0) vh->flipStatus.numFlipPending--;
+        if (vh->flipStatus.numGpuFlipPending > 0) vh->flipStatus.numGpuFlipPending--;
+        pthread_mutex_unlock(&vh->mutex);
+    }
+    pthread_mutex_unlock(&g_video_table_mutex);
 }
 
 int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferIndex, uint32_t flipMode, int64_t flipArg) {
     static uint32_t s_last_mode = ~0u;
     if (__atomic_exchange_n(&s_last_mode, flipMode, __ATOMIC_RELAXED) != flipMode)
         fprintf(stderr, "[videoout] SubmitFlip flip mode %u\n", flipMode);
-    ps4_metal_screen_set_guest_flip_mode((int)flipMode);
+    if (!gow3gpu_videoout_active()) ps4_metal_screen_set_guest_flip_mode((int)flipMode);
     __atomic_fetch_add(&g_ps4_videoout_flip_count, 1, __ATOMIC_RELAXED);
     pthread_mutex_lock(&g_video_table_mutex);
     VideoOutHandle *vh = find_video_handle_locked(handle);
@@ -357,6 +475,32 @@ int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferI
     vh->flipStatus.numGpuFlipPending++;
     pthread_mutex_unlock(&vh->mutex);
     pthread_mutex_unlock(&g_video_table_mutex);
+
+    if (gow3gpu_videoout_active()) {
+        Gow3GpuVideoOutSubmitFlipFn candidate_submit_flip =
+            (Gow3GpuVideoOutSubmitFlipFn)gow3gpu_videoout_symbol("U46NwOiJpys");
+        if (!candidate_submit_flip) {
+            rollback_flip_pending(handle);
+            return -ENOSYS;
+        }
+        const int32_t candidate_result =
+            candidate_submit_flip(handle, bufferIndex, (int32_t)flipMode, flipArg);
+        if (candidate_result != 0) {
+            rollback_flip_pending(handle);
+            fprintf(stderr,
+                    "[gow3gpu-route] candidate VideoOut flip failed: 0x%x\n",
+                    (unsigned)candidate_result);
+            return candidate_result;
+        }
+        static uint32_t candidate_flips;
+        if ((candidate_flips++ % 120) == 0) {
+            fprintf(stderr,
+                    "[gow3gpu-route] candidate Vulkan VideoOut accepted flip %u (buffer=%d)\n",
+                    candidate_flips, bufferIndex);
+        }
+        ps4_stall_watchdog_note_present();
+        return 0;
+    }
 
     PendingFlip *pf = (PendingFlip *)malloc(sizeof(PendingFlip));
     if (pf) {
@@ -548,6 +692,12 @@ int32_t sceVideoOutIsFlipPending(int32_t handle) {
 }
 
 int32_t sceVideoOutUnregisterBuffers(int32_t handle, int32_t setIndex) {
+    if (gow3gpu_videoout_active()) {
+        Gow3GpuVideoOutUnregisterBuffersFn candidate_unregister =
+            (Gow3GpuVideoOutUnregisterBuffersFn)gow3gpu_videoout_symbol("N5KDtkIjjJ4");
+        if (!candidate_unregister) return -ENOSYS;
+        return candidate_unregister(handle, setIndex);
+    }
     (void)handle;
     (void)setIndex;
     return 0;

@@ -322,9 +322,13 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 
 void VideoOutDriver::Flip(const Request& req) {
     // Update HDR status before presenting, then present the frame (gow3: on the swap thread).
-    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
+    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr,
+                  index = req.index, flip_arg = req.flip_arg] {
         presenter->SetHDR(hdr);
         presenter->Present(frame);
+        // The imported runtime owns guest VideoOut/equeue state. Notify it only after the
+        // candidate presenter has accepted this frame and queued its swapchain presentation.
+        gow3gpu_notify_host_videoout_flip(1, index, flip_arg);
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
@@ -599,9 +603,6 @@ void VideoOutDriver::Flip(const Request& req) {
     // save to prev buf index
     port->prev_index = req.index;
 
-    // The imported runtime owns the guest VideoOut/equeue state. Notify it only after this
-    // presenter has completed the flip and the candidate's own status is updated.
-    gow3gpu_notify_host_videoout_flip(1, req.index, req.flip_arg);
 }
 
 void VideoOutDriver::DrawBlankFrame() {

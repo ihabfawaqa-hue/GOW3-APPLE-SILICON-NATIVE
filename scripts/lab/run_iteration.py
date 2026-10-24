@@ -47,6 +47,11 @@ SOURCE_FILES = [
     "runtime/modules/libSceGnmDriver/ps4_gnmdriver.c",
     "runtime/modules/libSceVideoOut/ps4_metal_screen.m",
     "runtime/modules/libSceVideoOut/ps4_videoout.c",
+    "runtime/core/gow3gpu_runtime_loader.c",
+    "runtime/core/gow3gpu_runtime_loader.h",
+    "third_party/gow3gpu/gpu/shadps4/core/libraries/videoout/driver.cpp",
+    "third_party/gow3gpu/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp",
+    "third_party/gow3gpu/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp",
     "runtime/modules/libSceVideodec/ps4_videodec.c",
     "runtime/modules/libSceVideodec/ps4_videodec.h",
     "scripts/lab/run_iteration.py",
@@ -438,6 +443,72 @@ def frame_files(directory: Path) -> list[Path]:
     return sorted(directory.glob("frame_*.png")) if directory.exists() else []
 
 
+def write_rgba_png(path: Path, width: int, height: int, rgba: bytes) -> None:
+    """Write a bounded RGBA8 image without requiring Pillow."""
+    if len(rgba) != width * height * 4:
+        raise ValueError(f"RGBA byte count does not match {width}x{height}")
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data +
+                struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+
+    scanlines = b"".join(
+        b"\x00" + rgba[y * width * 4:(y + 1) * width * 4]
+        for y in range(height)
+    )
+    payload = (b"\x89PNG\r\n\x1a\n" +
+               chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)) +
+               chunk(b"IDAT", zlib.compress(scanlines, level=3)) +
+               chunk(b"IEND", b""))
+    path.write_bytes(payload)
+
+
+def convert_candidate_frame_dumps(run_dir: Path, text: str) -> list[dict[str, object]]:
+    """Convert only known 8-bit Vulkan output formats into screenshot PNGs."""
+    converted: list[dict[str, object]] = []
+    for match in re.finditer(
+        r"\[gow3gpu-frame\] raw file=([^\s]+) format=([^\s]+) width=(\d+) height=(\d+)",
+        text,
+    ):
+        filename, vk_format = match.group(1), match.group(2)
+        width, height = int(match.group(3)), int(match.group(4))
+        source = run_dir / "candidate-dump" / filename
+        record: dict[str, object] = {
+            "raw_file": str(source.relative_to(run_dir)),
+            "format": vk_format,
+            "width": width,
+            "height": height,
+            "status": "NOT_CONVERTED",
+        }
+        try:
+            raw = source.read_bytes()
+            if len(raw) != width * height * 4:
+                raise ValueError(f"raw image has {len(raw)} bytes, expected {width * height * 4}")
+            lower_format = vk_format.lower()
+            if "b8g8r8a8" in lower_format:
+                rgba = bytearray(raw)
+                rgba[0::4], rgba[2::4] = raw[2::4], raw[0::4]
+                pixel_order = "BGRA8 converted to RGBA8"
+            elif any(token in lower_format for token in ("r8g8b8a8", "a8b8g8r8")):
+                rgba = raw
+                pixel_order = "RGBA8"
+            else:
+                raise ValueError(f"unsupported output image format {vk_format}")
+            prefix = "frame_candidate_output" if filename.startswith("output_") else "frame_candidate_display"
+            target = run_dir / "frames" / f"{prefix}_{source.stem}.png"
+            write_rgba_png(target, width, height, bytes(rgba))
+            record.update({
+                "png_file": str(target.relative_to(run_dir)),
+                "png_sha256": sha256(target),
+                "pixel_order": pixel_order,
+                "status": "CONVERTED",
+            })
+        except Exception as exc:
+            record["error"] = str(exc)
+        converted.append(record)
+    return converted
+
+
 def previous_frame(exclude_dir: Path) -> Path | None:
     candidates = list(RUNS_DIR.glob("*/frames/*.png")) + list((BASE_DIR / "screenshots").glob("frame_*.png"))
     candidates = [p for p in candidates if p.is_file() and exclude_dir not in p.parents]
@@ -505,6 +576,21 @@ def parse_log_metrics(stdout: str, stderr: str) -> dict[str, object]:
     latest = presents[-1] if presents else None
     backend_match = re.search(r"Native Apple Metal GNM Command Processor initialized \(([^)]+)\)", text)
     vulkan_match = re.search(r"(?im)^.*(?:Vulkan device|Vulkan renderer|Vulkan backend)[: ]+([^\r\n]+)", text)
+    gow3gpu_route_match = re.search(
+        r"\[gow3gpu-route\] active PM4 owner=gow3gpu/shadPS4", text, re.I
+    )
+    candidate_videoout_open = bool(re.search(r"\[gow3gpu-route\] VideoOut handle \d+ opened", text))
+    candidate_videoout_registration = bool(re.search(r"\[gow3gpu-route\] registered \d+ display buffers", text))
+    candidate_videoout_accepts = re.findall(
+        r"\[gow3gpu-route\] candidate Vulkan VideoOut accepted flip (\d+)", text
+    )
+    candidate_videoout_handoffs = re.findall(
+        r"\[gow3gpu-route\] candidate Vulkan VideoOut presenter handoff (\d+)", text
+    )
+    candidate_device_match = re.search(r"(?m)^GPU: using (.+)$", text)
+    swapchain_format_match = re.search(
+        r"\[gow3gpu-vk\] swapchain selected surface format=([^\s]+)", text
+    )
     heuristic_msl_pipelines = len(re.findall(r"Heuristic MSL substitute compiled", text))
     gcn_selected = bool(re.search(r"GCN translated shader path: enabled", text, re.I))
     gcn_draws = len(re.findall(r"\[gcn-debug\] draw VS=", text))
@@ -529,16 +615,47 @@ def parse_log_metrics(stdout: str, stderr: str) -> dict[str, object]:
         }
     else:
         snapshot = None
-    active = "native-metal" if backend_match else ("vulkan" if vulkan_match else "not-confirmed")
+    if gow3gpu_route_match:
+        active = (
+            "gow3gpu/shadPS4 Vulkan PM4 + Vulkan VideoOut"
+            if candidate_videoout_handoffs
+            else "gow3gpu/shadPS4 Vulkan PM4 (VideoOut handoff not observed)"
+        )
+    else:
+        active = "native-metal" if backend_match else ("vulkan" if vulkan_match else "not-confirmed")
+    candidate_shader_frontend_observed = bool(
+        gow3gpu_route_match and re.search(r"emit_spirv\.cpp|shader_recompiler", text, re.I)
+    )
     return {
-        "configured_backend_from_source": "native-metal",
+        "configured_backend_from_source": "native-metal fallback + opt-in gow3gpu/shadPS4",
         "active_backend": active,
         "metal_device": backend_match.group(1) if backend_match else None,
-        "vulkan_device": vulkan_match.group(1).strip() if vulkan_match else None,
+        "vulkan_device": (
+            candidate_device_match.group(1).strip()
+            if gow3gpu_route_match and candidate_device_match
+            else vulkan_match.group(1).strip() if vulkan_match else None
+        ),
+        "vulkan_swapchain_format": swapchain_format_match.group(1) if swapchain_format_match else None,
+        "gow3gpu_pm4_owner_installed": bool(gow3gpu_route_match),
+        "gow3gpu_shader_frontend_observed": candidate_shader_frontend_observed,
+        "presentation_backend": (
+            "gow3gpu/shadPS4 Vulkan VideoOut" if candidate_videoout_handoffs
+            else "native-metal" if backend_match else "not-confirmed"
+        ),
         "presentation_log_entries": len(presents),
+        "candidate_videoout_open_observed": candidate_videoout_open,
+        "candidate_videoout_buffer_registration_observed": candidate_videoout_registration,
+        "candidate_videoout_acceptance_log_entries": len(candidate_videoout_accepts),
+        "candidate_videoout_presenter_handoff_log_entries": len(candidate_videoout_handoffs),
         "latest_pm4_snapshot": snapshot,
         "heuristic_msl_pipeline_log_entries": heuristic_msl_pipelines,
-        "gcn_translation_path": "MSL_TRANSLATOR_SELECTED" if gcn_selected else "BUILT_OPT_IN_NOT_SELECTED",
+        "gcn_translation_path": (
+            "SHADPS4_FRONTEND_OBSERVED"
+            if candidate_shader_frontend_observed
+            else "SHADPS4_ROUTE_ACTIVE_FRONTEND_UNCONFIRMED"
+            if gow3gpu_route_match
+            else "MSL_TRANSLATOR_SELECTED" if gcn_selected else "BUILT_OPT_IN_NOT_SELECTED"
+        ),
         "gcn_translated_draw_debug_records": gcn_draws,
         "gcn_fallback_log_records": [
             {"reported_occurrence": int(count), "reason": reason}
@@ -556,8 +673,18 @@ def milestone_summary(stdout: str, stderr: str, gpu: dict[str, object]) -> dict[
         "runtime_started": bool(re.search(r"Initializing runtime|Loading guest memory image", text, re.I)),
         "guest_memory_loaded": bool(re.search(r"guest memory at host|Loading guest memory image", text, re.I)),
         "entrypoint_started": bool(re.search(r"Executing _start|via ARM64 assembly", text, re.I)),
-        "metal_backend_initialized": gpu["active_backend"] == "native-metal",
-        "at_least_one_logged_presentation": bool(gpu["presentation_log_entries"]),
+        "metal_backend_initialized": bool(gpu["metal_device"]),
+        "metal_videoout_initialized": bool(gpu["metal_device"]),
+        "gow3gpu_pm4_owner_installed": bool(gpu["gow3gpu_pm4_owner_installed"]),
+        "gow3gpu_shader_frontend_observed": bool(gpu["gow3gpu_shader_frontend_observed"]),
+        "candidate_videoout_open_observed": bool(gpu["candidate_videoout_open_observed"]),
+        "candidate_videoout_buffer_registration_observed": bool(gpu["candidate_videoout_buffer_registration_observed"]),
+        "candidate_videoout_presentation_observed": bool(
+            gpu["candidate_videoout_presenter_handoff_log_entries"]
+        ),
+        "at_least_one_logged_presentation": bool(
+            gpu["presentation_log_entries"] or gpu["candidate_videoout_presenter_handoff_log_entries"]
+        ),
         "game_completion_reached": "Execution complete." in text,
     }
 
@@ -594,6 +721,7 @@ def main() -> int:
     run_dir = RUNS_DIR / run_id
     (run_dir / "frames").mkdir(parents=True, exist_ok=False)
     (run_dir / "gpu-captures").mkdir()
+    (run_dir / "candidate-dump").mkdir()
     (run_dir / "failures").mkdir()
     baseline = {
         "mode": args.mode,
@@ -606,7 +734,13 @@ def main() -> int:
         "source_sha256": source_fingerprints(),
         "host_architecture": platform.machine(),
         "host_platform": platform.platform(),
-        "renderer_configured": "native-metal (direct GNM/VideoOut path verified from source)",
+        "renderer_requested": os.environ.get("PS4_GOW3GPU_BACKEND", "native-metal"),
+        "renderer_library": os.environ.get("PS4_GOW3GPU_LIBRARY"),
+        "renderer_configured": (
+            "gow3gpu/shadPS4 candidate (opt-in request; runtime log must confirm initialization)"
+            if os.environ.get("PS4_GOW3GPU_BACKEND") == "gow3gpu-vulkan"
+            else "native-metal (direct GNM/VideoOut path verified from source)"
+        ),
         "selected_asset_directory": os.environ.get("GOW3_DIR", str(DEFAULT_ASSETS)),
         "stages": {},
     }
@@ -718,6 +852,26 @@ def main() -> int:
     runtime_env["PS4_SCREENSHOT_DIR"] = str(run_dir / "frames")
     runtime_env["PS4_SCREENSHOT_EVERY"] = str(max(1, args.screenshot_every))
     runtime_env["PS4_GPU_CAPTURE_DIR"] = str(run_dir / "gpu-captures")
+    candidate_backend = runtime_env.get("PS4_GOW3GPU_BACKEND") == "gow3gpu-vulkan"
+    if candidate_backend:
+        candidate_user_dir = Path(runtime_env.get(
+            "PS4_GOW3GPU_USER_DIR",
+            str(Path.home() / "Library/Application Support/GOW3Lab/candidate-user"),
+        )).expanduser()
+        runtime_env["PS4_GOW3GPU_USER_DIR"] = str(candidate_user_dir)
+        runtime_env["GOW3_GPU_USER_DIR"] = str(candidate_user_dir)
+        runtime_env["GOW3_CAPTURE_DIR"] = str(run_dir / "gpu-captures")
+        capture_trigger = run_dir / "candidate-pass-trace.trigger"
+        capture_trigger.touch()
+        runtime_env["GOW3_CAPTURE_TRIGGER"] = str(capture_trigger)
+        dump_trigger = run_dir / "candidate-frame-dump.trigger"
+        dump_trigger.touch()
+        runtime_env["GOW3_DUMP_DIR"] = str(run_dir / "candidate-dump")
+        runtime_env["GOW3_FRAME_DUMP_TRIGGER"] = str(dump_trigger)
+        runtime_env["GOW3_FRAME_DUMP_EVERY"] = "240"
+        runtime_env["GOW3_FRAME_DUMP_MAX"] = "4"
+        runtime_env["GOW3_CAPTURE_EVERY"] = "240"
+        runtime_env["GOW3_CAPTURE_MAX"] = "3"
     runtime_env["PS4_AUDIO_LOG"] = "1"
     runtime_env["PS4_AJM_LOG"] = "1"
     audio_dump_path = run_dir / "audio-mix.wav"
@@ -737,6 +891,7 @@ def main() -> int:
     stdout = (run_dir / "stdout.log").read_text(errors="replace")
     stderr = (run_dir / "stderr.log").read_text(errors="replace")
     full_text = stdout + "\n" + stderr
+    candidate_frame_dumps = convert_candidate_frame_dumps(run_dir, full_text)
     gpu = parse_log_metrics(stdout, stderr)
     milestones = milestone_summary(stdout, stderr, gpu)
     frames, comparison = analyze_frames(frame_files(run_dir / "frames"), run_dir)
@@ -747,19 +902,39 @@ def main() -> int:
         (record for record in reversed(frames) if "frame_assessment" in record), None
     )
     capture_files = sorted(
-        path for path in (run_dir / "gpu-captures").iterdir() if path.is_file()
+        path for directory in (run_dir / "gpu-captures", run_dir / "candidate-dump")
+        for path in directory.iterdir() if path.is_file()
+    )
+    capture_has_trace = any(path.suffix == ".txt" for path in capture_files)
+    capture_has_raw = any(path.suffix == ".raw" for path in capture_files)
+    capture_has_json = any(path.suffix == ".json" for path in capture_files)
+    capture_status = (
+        "CAPTURED_RENDER_PASS_TRACE_AND_RAW_FRAME" if capture_has_trace and capture_has_raw
+        else "CAPTURED_RENDER_PASS_TRACE" if capture_has_trace
+        else "CAPTURED_RAW_FRAME" if capture_has_raw
+        else "CAPTURED_PARTIAL_DRAW_SNAPSHOT" if capture_has_json
+        else "NOT_CAPTURED"
     )
     capture_manifest = {
-        "status": "CAPTURED_PARTIAL_DRAW_SNAPSHOT" if any(path.suffix == ".json" for path in capture_files) else "NOT_CAPTURED",
+        "status": capture_status,
         "replay_status": "NOT_IMPLEMENTED",
         "files": [
-            {"file": path.name, "bytes": path.stat().st_size, "sha256": sha256(path)}
+            {"file": str(path.relative_to(run_dir)), "bytes": path.stat().st_size, "sha256": sha256(path)}
             for path in capture_files
         ],
     }
     write_json(run_dir / "gpu-captures" / "manifest.json", capture_manifest)
     gpu["draw_capture_status"] = capture_manifest["status"]
     gpu["draw_capture_file_count"] = len(capture_files)
+    gpu["candidate_frame_dump_records"] = candidate_frame_dumps
+    gpu["candidate_frame_dump_png_count"] = sum(
+        record.get("status") == "CONVERTED" for record in candidate_frame_dumps
+    )
+    gpu["candidate_output_png_count"] = sum(
+        record.get("status") == "CONVERTED" and
+        str(record.get("raw_file", "")).startswith("candidate-dump/output_")
+        for record in candidate_frame_dumps
+    )
     write_json(run_dir / "gpu-summary.json", gpu)
     write_json(run_dir / "shader-summary.json", {
         "status": gpu["gcn_translation_path"],
@@ -767,7 +942,7 @@ def main() -> int:
         "gcn_translated_draw_debug_records": gpu["gcn_translated_draw_debug_records"],
         "gcn_fallback_log_records": gpu["gcn_fallback_log_records"],
         "translation_correctness": "UNVERIFIED",
-        "backend": "Metal MSL; this is not the shadPS4 Vulkan GPU backend",
+        "backend": gpu["active_backend"],
         "shader_errors": gpu["shader_pipeline_errors"],
     })
     thread_lines = [line for line in full_text.splitlines() if re.search(r"thread|stall|watchdog|deadlock", line, re.I)]
@@ -808,6 +983,7 @@ def main() -> int:
     baseline["startup_milestones"] = milestones
     baseline["captured_frame_count"] = len(frames)
     baseline["gpu_draw_capture"] = capture_manifest
+    baseline["candidate_frame_dump"] = candidate_frame_dumps
     baseline["frame_analysis"] = {
         "classification_counts": dict(frame_classifications),
         "latest_frame": latest_frame,
@@ -836,7 +1012,32 @@ def main() -> int:
         blocker = "No screenshot was saved during the bounded runtime."
     else:
         verdict, exit_code = "PARTIAL", 0
-        if gpu["gcn_translation_path"] == "BUILT_OPT_IN_NOT_SELECTED":
+        if gpu["gow3gpu_pm4_owner_installed"]:
+            if not gpu["candidate_videoout_open_observed"]:
+                blocker = (
+                    "The shadPS4 Vulkan PM4 route initialized, but the guest did not open the candidate "
+                    "VideoOut presenter in this bounded run. Candidate presentation and post-splash "
+                    "graphics remain unverified."
+                )
+            elif not gpu["candidate_videoout_presenter_handoff_log_entries"]:
+                blocker = (
+                    "The guest opened the candidate VideoOut path, but no presenter handoff was observed. "
+                    "Inspect VideoOut registration/flip logs and the first Vulkan capture for the point "
+                    "where guest presentation stops."
+                )
+            elif not gpu["candidate_output_png_count"]:
+                blocker = (
+                    "The candidate Vulkan presenter accepted flips, but the one-shot internal frame dump "
+                    "did not produce a convertible output image. PM4/shader processing is observed; "
+                    "visual correctness remains unverified."
+                )
+            else:
+                blocker = (
+                    "The candidate Vulkan path produced internally captured frames, but visual authenticity "
+                    "and post-splash game correctness remain unverified. Inspect the exported PNGs and "
+                    "render-pass trace before changing GPU state."
+                )
+        elif gpu["gcn_translation_path"] == "BUILT_OPT_IN_NOT_SELECTED":
             blocker = (
                 "The active Metal path used heuristic MSL substitutes; the vendored GCN-to-SPIR-V/MSL path "
                 "is opt-in and was not selected. Correct geometry remains unverified."
@@ -868,7 +1069,10 @@ def main() -> int:
     report = [
         f"# GOW3 run {run_id}", "", f"- Session verdict: **{verdict}**",
         f"- Build: **PASS** ({binary_arch})", f"- Runtime: **{runtime_result['status']}** ({runtime_result['termination_reason']})",
-        f"- Active graphics backend: **{gpu['active_backend']}**",
+        f"- Active graphics backend: **{gpu['active_backend']}**" + (
+            f"; swapchain format `{gpu['vulkan_swapchain_format']}`"
+            if gpu["vulkan_swapchain_format"] else ""
+        ),
         f"- Frames captured: **{len(frames)}**; authenticity: **UNVERIFIED**",
         f"- Frame classifications: `{json.dumps(dict(frame_classifications), sort_keys=True)}`",
         f"- Latest frame assessment: **{latest_frame['frame_assessment']}**" if latest_frame else "- Latest frame assessment: unavailable",
@@ -877,6 +1081,8 @@ def main() -> int:
             if comparison.get("mean_absolute_rgb_difference_64x36") is not None else ""
         ),
         f"- GPU state capture: **{capture_manifest['status']}** ({len(capture_files)} files); replay: NOT_IMPLEMENTED",
+        f"- Candidate Vulkan presenter handoff log entries: **{gpu['candidate_videoout_presenter_handoff_log_entries']}**",
+        f"- Candidate frame PNGs: **{gpu['candidate_frame_dump_png_count']}** (final output {gpu['candidate_output_png_count']})",
         f"- First blocker: {blocker}",
         f"- Artifacts: `{run_dir}`", "",
         "Counters and color statistics describe observed activity only. They do not establish correct rendering.",
@@ -884,7 +1090,7 @@ def main() -> int:
     (run_dir / "summary.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     print(f"RUNTIME: {runtime_result['status']} ({runtime_result['termination_reason']}, {runtime_result['duration_seconds']}s)")
     print(f"BACKEND: {gpu['active_backend']}" + (f" ({gpu['metal_device']})" if gpu["metal_device"] else ""))
-    print(f"PRESENTS: {gpu['presentation_log_entries']} | FRAMES: {len(frames)} | AUTHENTICITY: UNVERIFIED")
+    print(f"PRESENTS: Metal logs {gpu['presentation_log_entries']} | candidate handoff logs {gpu['candidate_videoout_presenter_handoff_log_entries']} | FRAMES: {len(frames)} | AUTHENTICITY: UNVERIFIED")
     print(f"FRAME TYPES: {dict(frame_classifications)}")
     print(f"GPU CAPTURE: {capture_manifest['status']} ({len(capture_files)} files), replay NOT_IMPLEMENTED")
     print(f"VERDICT: {verdict}")

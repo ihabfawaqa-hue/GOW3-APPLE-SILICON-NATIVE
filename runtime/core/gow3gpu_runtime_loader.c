@@ -24,6 +24,14 @@ typedef int (*CandidateFaultFn)(void *ucontext, void *address);
 /* The C ABI has no coordinated shutdown yet. Keep this handle loaded for the
  * process lifetime; the bounded lab terminates only the app instance it starts. */
 static void *g_candidate_library;
+static ResolveNidFn g_candidate_resolve;
+
+uintptr_t ps4_gow3gpu_resolve_candidate(const char *scoped_nid) {
+  if (!scoped_nid || !g_candidate_resolve ||
+      !ps4_gow3gpu_submission_backend_active())
+    return 0;
+  return g_candidate_resolve(scoped_nid);
+}
 
 static void *required_symbol(void *library, const char *name) {
   dlerror();
@@ -149,6 +157,7 @@ int ps4_gow3gpu_start_requested_backend(GuestContext *ctx) {
     return -1;
   }
   register_kernel();
+  g_candidate_resolve = resolve;
 
   const uintptr_t submit_address =
       resolve("zwY0YV91TTI#libSceGnmDriver#libSceGnmDriver");
@@ -159,6 +168,23 @@ int ps4_gow3gpu_start_requested_backend(GuestContext *ctx) {
   if (!submit_address || !submit_done_address || !wait_idle_address) {
     fprintf(stderr, "[gow3gpu-route] candidate GNM submit NIDs are unavailable\n");
     return -1;
+  }
+
+  static const char *const required_videoout_nids[] = {
+      "Up36PTk687E#libSceVideoOut#libSceVideoOut", /* Open */
+      "uquVH4-Du78#libSceVideoOut#libSceVideoOut", /* Close */
+      "w3BY+tAEiQY#libSceVideoOut#libSceVideoOut", /* RegisterBuffers */
+      "N5KDtkIjjJ4#libSceVideoOut#libSceVideoOut", /* UnregisterBuffers */
+      "CBiu4mCE1DA#libSceVideoOut#libSceVideoOut", /* SetFlipRate */
+      "U46NwOiJpys#libSceVideoOut#libSceVideoOut", /* SubmitFlip */
+  };
+  for (size_t i = 0; i < sizeof(required_videoout_nids) / sizeof(required_videoout_nids[0]);
+       ++i) {
+    if (!resolve(required_videoout_nids[i])) {
+      fprintf(stderr, "[gow3gpu-route] candidate VideoOut NID unavailable: %s\n",
+              required_videoout_nids[i]);
+      return -1;
+    }
   }
 
   const Gow3GpuGuestMemoryApi *memory_api =
@@ -174,8 +200,8 @@ int ps4_gow3gpu_start_requested_backend(GuestContext *ctx) {
   }
 
   fprintf(stderr,
-          "[gow3gpu-route] active PM4 owner=gow3gpu/shadPS4 SDK=0x%08x; "
-          "primary VideoOut presentation remains selected for this integration test\n",
+          "[gow3gpu-route] active PM4 owner=gow3gpu/shadPS4; candidate Vulkan VideoOut "
+          "imports available; primary runtime retains flip-event ownership (SDK=0x%08x)\n",
           sdk_version);
   return 0;
 }

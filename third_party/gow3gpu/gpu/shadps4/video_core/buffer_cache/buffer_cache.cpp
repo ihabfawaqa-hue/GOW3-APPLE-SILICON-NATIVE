@@ -6,8 +6,10 @@
 #include <map>
 #include <unordered_map>
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstdlib>
+#include <limits>
 #include <magic_enum/magic_enum.hpp>
 #include "gow3_copy.h"
 #include "gow3_toggles.h"
@@ -70,9 +72,12 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         LOG_INFO(Render_Vulkan, "Buffer arenas of {} MiB (driver buffer limit {} MiB)",
                  arena_page_size >> 20, instance.GetMaxBufferSize() >> 20);
     }
+    const bool sparse_buffer_cache = instance.SupportsSparseBufferResidency();
     const vk::BufferCreateInfo probe_ci = {
-        .flags =
-            vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
+        .flags = sparse_buffer_cache
+                     ? vk::BufferCreateFlagBits::eSparseBinding |
+                           vk::BufferCreateFlagBits::eSparseResidency
+                     : vk::BufferCreateFlags{},
         .size = arena_page_size,
         .usage = ARENA_USAGE,
         .sharingMode = vk::SharingMode::eExclusive,
@@ -83,20 +88,22 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     const auto device = instance.GetDevice();
     const auto reqs = device.getBufferMemoryRequirements(req_info).memoryRequirements;
     block_size = Common::AlignUp(std::max<u64>(reqs.alignment, MIN_BLOCK_SIZE), reqs.alignment);
-    ASSERT_MSG(std::popcount(block_size) == 1, "Sparse block size {} is not a power of 2",
+    ASSERT_MSG(std::popcount(block_size) == 1, "Buffer block size {} is not a power of 2",
                block_size);
     block_shift = std::bit_width(block_size) - 1;
     blocks_per_arena_page = arena_page_size / block_size;
     blocks_per_arena_page_shift = arena_page_bits - block_shift;
-    arena_memory_type_index =
-        FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
-                       reqs.memoryTypeBits)
-            .value();
+    if (sparse_buffer_cache) {
+        arena_memory_type_index =
+            FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
+                           reqs.memoryTypeBits)
+                .value();
+    }
 
-    const u64 bda_pagetable_size =
-        (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress);
+    const u64 bda_pagetable_entries = u64{1} << (ADDRESS_SPACE_BITS - block_shift);
+    const u64 bda_pagetable_size = bda_pagetable_entries * sizeof(vk::DeviceAddress);
     fault_manager = std::make_unique<FaultManager>(instance, scheduler, *this, block_shift,
-                                                   blocks_per_arena_page * num_arena_pages);
+                                                   bda_pagetable_entries);
     bda_pagetable_buffer = std::make_unique<Buffer>(
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
@@ -395,6 +402,21 @@ void BufferCache::ProcessFaultBuffer() {
 }
 
 void BufferCache::SynchronizeDmaBuffers() {
+    if (!instance.SupportsSparseBufferResidency()) {
+        for (const auto& arena : dense_arenas) {
+            VAddr address = arena->start_block << block_shift;
+            u64 remaining = (arena->end_block - arena->start_block) << block_shift;
+            constexpr u64 MaxChunk = (u64{std::numeric_limits<u32>::max()} / MIN_BLOCK_SIZE) *
+                                     MIN_BLOCK_SIZE;
+            while (remaining != 0) {
+                const u32 chunk = static_cast<u32>(std::min(remaining, MaxChunk));
+                SynchronizeMemory(arena->buffer.get(), address, chunk, false, false);
+                address += chunk;
+                remaining -= chunk;
+            }
+        }
+        return;
+    }
     for (const auto& range : resident_ranges) {
         const u64 page = range.start >> (arena_page_bits - block_shift);
         const VAddr device_addr = range.start << block_shift;
@@ -404,6 +426,10 @@ void BufferCache::SynchronizeDmaBuffers() {
 }
 
 const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
+    if (!instance.SupportsSparseBufferResidency()) {
+        return GetDenseArena(first_block, last_block);
+    }
+
     const u64 first_page = first_block >> blocks_per_arena_page_shift;
     const u64 last_page = last_block >> blocks_per_arena_page_shift;
     ASSERT_MSG(last_page - first_page <= 1,
@@ -457,7 +483,131 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     return new_arena;
 }
 
+const Buffer* BufferCache::GetDenseArena(u64 first_block, u64 last_block) {
+    ASSERT_MSG(first_block <= last_block, "Invalid dense buffer range {:#x}..{:#x}", first_block,
+               last_block);
+    u64 start_block = first_block;
+    u64 end_block = last_block + 1;
+    std::vector<DenseArena*> selected;
+    bool changed;
+    do {
+        changed = false;
+        for (const auto& arena : dense_arenas) {
+            if (std::ranges::find(selected, arena.get()) != selected.end()) {
+                continue;
+            }
+            if (arena->end_block < start_block || arena->start_block > end_block) {
+                continue;
+            }
+            selected.push_back(arena.get());
+            start_block = std::min(start_block, arena->start_block);
+            end_block = std::max(end_block, arena->end_block);
+            changed = true;
+        }
+    } while (changed);
+
+    if (selected.size() == 1 && selected.front()->start_block <= first_block &&
+        selected.front()->end_block >= last_block + 1) {
+        return selected.front()->buffer.get();
+    }
+
+    const u64 range_bytes = (end_block - start_block) << block_shift;
+    ASSERT_MSG(range_bytes <= instance.GetMaxBufferSize(),
+               "Dense guest buffer range {:#x}..{:#x} is {} MiB, above the Vulkan limit of {} MiB",
+               start_block << block_shift, end_block << block_shift, range_bytes >> 20,
+               instance.GetMaxBufferSize() >> 20);
+
+    static std::atomic<u32> dense_arena_log_count{};
+    const u32 log_index = dense_arena_log_count.fetch_add(1, std::memory_order_relaxed);
+    if (log_index < 16) {
+        LOG_INFO(Render_Vulkan,
+                 "Dense guest buffer range #{}, guest={:#x}..{:#x}, size={} KiB, "
+                 "migrated_ranges={}",
+                 log_index + 1, start_block << block_shift, end_block << block_shift,
+                 range_bytes >> 10, selected.size());
+    } else if (log_index == 16) {
+        LOG_INFO(Render_Vulkan, "Further dense guest buffer range logs suppressed");
+    }
+
+    auto new_arena = std::make_unique<DenseArena>();
+    new_arena->start_block = start_block;
+    new_arena->end_block = end_block;
+    new_arena->buffer = std::make_unique<Buffer>(
+        instance, start_block << block_shift, range_bytes, MemoryType::DeviceLocal,
+        fmt::format("Dense guest buffer {:#x}:{:#x}", start_block << block_shift, range_bytes));
+
+    if (!selected.empty()) {
+        // Preserve pending guest writes before migrating the device-local backing ranges.
+        constexpr u64 MaxChunk = (u64{std::numeric_limits<u32>::max()} / MIN_BLOCK_SIZE) *
+                                 MIN_BLOCK_SIZE;
+        for (const DenseArena* arena : selected) {
+            VAddr address = arena->start_block << block_shift;
+            u64 remaining = (arena->end_block - arena->start_block) << block_shift;
+            while (remaining != 0) {
+                const u32 chunk = static_cast<u32>(std::min(remaining, MaxChunk));
+                SynchronizeMemory(arena->buffer.get(), address, chunk, false, false);
+                address += chunk;
+                remaining -= chunk;
+            }
+        }
+        scheduler.Finish();
+
+        // One ordinary VkBuffer now covers the whole connected guest range. Copying old
+        // backings before retiring them preserves GPU writes and direct-buffer aliasing.
+        for (const DenseArena* arena : selected) {
+            const vk::BufferCopy copy{
+                .srcOffset = 0,
+                .dstOffset = (arena->start_block - start_block) << block_shift,
+                .size = arena->buffer->SizeBytes(),
+            };
+            runtime.CopyBuffer(arena->buffer.get(), new_arena->buffer.get(), std::span{&copy, 1});
+        }
+    }
+
+    UpdateDenseBdaPageTable(new_arena->buffer.get(), start_block, end_block);
+    // Retire old handles only after their copies and the address-table update have completed.
+    if (!selected.empty()) {
+        scheduler.Finish();
+    }
+
+    if (!selected.empty()) {
+        dense_arenas.erase(
+            std::remove_if(dense_arenas.begin(), dense_arenas.end(), [&](const auto& arena) {
+                return std::ranges::find(selected, arena.get()) != selected.end();
+            }),
+            dense_arenas.end());
+    }
+    const Buffer* result = new_arena->buffer.get();
+    dense_arenas.push_back(std::move(new_arena));
+    return result;
+}
+
+void BufferCache::UpdateDenseBdaPageTable(const Buffer* buffer, u64 first_block,
+                                          u64 end_block) {
+    ASSERT_MSG(first_block < end_block, "Invalid BDA page-table range");
+    const u64 count = end_block - first_block;
+    const u64 byte_count = count * sizeof(vk::DeviceAddress);
+    std::vector<vk::DeviceAddress> addresses(static_cast<size_t>(count));
+    const vk::DeviceAddress base_address = buffer->BufferDeviceAddress();
+    for (u64 index = 0; index < count; ++index) {
+        addresses[index] = base_address + (index << block_shift);
+    }
+
+    const auto staging = staging_pool.Request(byte_count, MemoryType::HostUncached);
+    std::memcpy(staging.mapped, addresses.data(), static_cast<size_t>(byte_count));
+    staging.Flush();
+    const vk::BufferCopy copy{
+        .srcOffset = staging.offset,
+        .dstOffset = first_block * sizeof(vk::DeviceAddress),
+        .size = byte_count,
+    };
+    runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), std::span{&copy, 1});
+}
+
 void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
+    if (!instance.SupportsSparseBufferResidency()) {
+        return;
+    }
     u32 resident_blocks{};
     IntervalList bind_ranges;
     resident_ranges.ForEachGap(first_block, last_block + 1, [&](u64 start, u64 end) {

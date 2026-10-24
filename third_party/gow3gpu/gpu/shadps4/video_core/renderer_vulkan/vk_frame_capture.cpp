@@ -154,8 +154,17 @@ void Write(VAddr presented) {
 
 void FrameCapture::OnFlip(VAddr presented_address) {
     last_presented.store(presented_address, std::memory_order_relaxed);
-    flips.fetch_add(1, std::memory_order_release);
+    const u64 flip = flips.fetch_add(1, std::memory_order_release) + 1;
     static const char* trigger = std::getenv("GOW3_CAPTURE_TRIGGER");
+    static const u64 every = [] {
+        const char* value = std::getenv("GOW3_CAPTURE_EVERY");
+        return value ? static_cast<u64>(std::strtoull(value, nullptr, 10)) : 0;
+    }();
+    static const u32 max_captures = [] {
+        const char* value = std::getenv("GOW3_CAPTURE_MAX");
+        return value ? static_cast<u32>(std::max(0, std::atoi(value))) : 1u;
+    }();
+    static u32 captures_armed = 0;
     if (state.load(std::memory_order_relaxed) != Idle) {
         return;
     }
@@ -165,7 +174,11 @@ void FrameCapture::OnFlip(VAddr presented_address) {
         std::filesystem::remove(trigger, ec);
         arm = true;
     }
+    if (!arm && every && captures_armed < max_captures && flip % every == 0) {
+        arm = true;
+    }
     if (arm) {
+        ++captures_armed;
         state.store(Armed, std::memory_order_release);
         std::printf("Frame capture: armed\n");
     }

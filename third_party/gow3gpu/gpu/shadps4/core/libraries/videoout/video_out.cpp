@@ -338,7 +338,10 @@ s32 PS4_SYSV_ABI sceVideoOutGetBufferLabelAddress(s32 handle, uintptr_t* label_a
     if (!port) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
-    *label_addr = reinterpret_cast<uintptr_t>(port->buffer_labels.data());
+    if (!port->buffer_labels || !port->buffer_labels_guest_address) {
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS;
+    }
+    *label_addr = static_cast<uintptr_t>(port->buffer_labels_guest_address);
     return 16;
 }
 

@@ -19,7 +19,7 @@ typedef struct {
  * addresses, never host pointers. The host owns the mapping and must validate
  * full ranges while holding its VM/direct-memory synchronization. The callbacks
  * must be safe from GPU worker threads. */
-#define GOW3GPU_GUEST_MEMORY_ABI_VERSION 1u
+#define GOW3GPU_GUEST_MEMORY_ABI_VERSION 2u
 typedef void (*Gow3GpuGuestRangeHook)(void *hook_context, uint64_t address,
                                       uint64_t size);
 typedef enum {
@@ -68,6 +68,16 @@ typedef struct {
                              Gow3GpuGuestRangeHook unmap,
                              Gow3GpuGuestRangeHook invalidate,
                              void *hook_context);
+    /* Allocate stable process-lifetime storage inside the authoritative guest
+     * address space. The returned host pointer accesses the same bytes as the
+     * guest VA and remains valid until release_process_memory or process
+     * teardown. The allocator must publish the new mapping through map hooks. */
+    int (*allocate_process_memory)(void *user_context, uint64_t size,
+                                   uint64_t alignment, const char *name,
+                                   uint64_t *guest_address, void **host_pointer);
+    /* Release an allocation only after the GPU no longer references it. */
+    int (*release_process_memory)(void *user_context, uint64_t guest_address,
+                                  uint64_t size, void *host_pointer);
 } Gow3GpuGuestMemoryApi;
 
 /* Install exactly once before gow3gpu_init. Invalid or incomplete contracts

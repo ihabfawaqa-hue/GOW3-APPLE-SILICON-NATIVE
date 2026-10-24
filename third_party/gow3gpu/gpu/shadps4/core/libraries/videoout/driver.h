@@ -23,8 +23,11 @@ namespace Libraries::VideoOut {
 struct VideoOutPort {
     SceVideoOutResolutionStatus resolution;
     std::array<VideoOutBuffer, MaxDisplayBuffers> buffer_slots;
-    std::array<u64, MaxDisplayBuffers> buffer_labels; // should be contiguous in memory
-    static_assert(sizeof(buffer_labels[0]) == 8u);
+    // Guest-visible labels must be backed by the runtime's authoritative guest
+    // mapping. Keep the stable host view and guest VA separately.
+    u64* buffer_labels{};
+    u64 buffer_labels_guest_address{};
+    static_assert(sizeof(u64) == 8u);
     std::array<BufferAttributeGroup, MaxDisplayBufferGroups> groups;
     FlipStatus flip_status;
     SceVideoOutVblankStatus vblank_status;
@@ -48,9 +51,12 @@ struct VideoOutPort {
     }
 
     bool IsVoLabel(const u64* address) const {
-        const u64* start = &buffer_labels[0];
-        const u64* end = &buffer_labels[MaxDisplayBuffers - 1];
-        return address >= start && address <= end;
+        if (!address || !buffer_labels) return false;
+        const auto candidate = reinterpret_cast<std::uintptr_t>(address);
+        const auto start = reinterpret_cast<std::uintptr_t>(buffer_labels);
+        return candidate >= start && candidate - start <
+               sizeof(u64) * MaxDisplayBuffers &&
+               (candidate - start) % sizeof(u64) == 0;
     }
 
     void WaitVoLabel(auto&& pred) {

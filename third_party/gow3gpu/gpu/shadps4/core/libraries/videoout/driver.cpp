@@ -23,6 +23,7 @@
 #include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/memory.h"
 #include "../../../../gow3gpu.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
@@ -121,6 +122,20 @@ int VideoOutDriver::Open(const ServiceThreadParams* params) {
     if (main_port.is_open) {
         return ORBIS_VIDEO_OUT_ERROR_RESOURCE_BUSY;
     }
+    if (!main_port.buffer_labels) {
+        VAddr guest_address{};
+        void* host_pointer{};
+        if (!Core::Memory::Instance()->AllocateProcessMemory(
+                sizeof(u64) * MaxDisplayBuffers, 4096,
+                "gow3gpu-videoout-labels", guest_address, host_pointer)) {
+            LOG_ERROR(Lib_VideoOut,
+                      "Failed to allocate guest-backed VideoOut flip labels");
+            return ORBIS_VIDEO_OUT_ERROR_RESOURCE_BUSY;
+        }
+        main_port.buffer_labels = static_cast<u64*>(host_pointer);
+        main_port.buffer_labels_guest_address = guest_address;
+    }
+    std::fill_n(main_port.buffer_labels, MaxDisplayBuffers, 0);
     main_port.is_open = true;
     liverpool->SetVoPort(&main_port);
     return 1;
@@ -135,7 +150,11 @@ void VideoOutDriver::Close(s32 handle) {
     main_port.prev_index = -1;
 
     // Clear port information
-    std::memset(main_port.buffer_labels.data(), 0, sizeof(main_port.buffer_labels));
+    // Keep this process-lifetime guest allocation stable across Close/Open so
+    // queued PM4 waits can never observe freed or reused host memory.
+    if (main_port.buffer_labels) {
+        std::memset(main_port.buffer_labels, 0, sizeof(u64) * MaxDisplayBuffers);
+    }
     std::memset(main_port.groups.data(), 0, sizeof(main_port.groups));
     std::memset(&main_port.vblank_status, 0, sizeof(main_port.vblank_status));
     main_port.flip_status = FlipStatus{};

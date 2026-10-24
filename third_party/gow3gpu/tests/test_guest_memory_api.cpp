@@ -26,6 +26,8 @@ struct FakeMemory {
     void* hook_context{};
     unsigned host_to_guest_calls{};
     unsigned atomic_calls{};
+    unsigned allocate_calls{};
+    unsigned release_calls{};
 };
 
 bool Region(FakeMemory& memory, std::uint64_t address, std::uint64_t* start,
@@ -167,6 +169,24 @@ int InstallHooks(void* context, Gow3GpuGuestRangeHook map,
     memory.hook_context = hook_context;
     return 1;
 }
+
+int AllocateProcessMemory(void* context, std::uint64_t size,
+                          std::uint64_t alignment, const char*,
+                          std::uint64_t* guest, void** host) {
+    auto& memory = *static_cast<FakeMemory*>(context);
+    ++memory.allocate_calls;
+    if (size != 8 || alignment != 8 || !guest || !host) return 0;
+    *guest = 0x1008;
+    *host = memory.bytes.data() + 8;
+    return 1;
+}
+
+int ReleaseProcessMemory(void* context, std::uint64_t guest,
+                         std::uint64_t size, void* host) {
+    auto& memory = *static_cast<FakeMemory*>(context);
+    ++memory.release_calls;
+    return guest == 0x1008 && size == 8 && host == memory.bytes.data() + 8;
+}
 } // namespace
 
 int main() {
@@ -190,12 +210,17 @@ int main() {
         .clamp_range_size = ClampRange,
         .gpu_protect = Protect,
         .install_gpu_hooks = InstallHooks,
+        .allocate_process_memory = AllocateProcessMemory,
+        .release_process_memory = ReleaseProcessMemory,
     };
     auto incomplete_api = api;
     incomplete_api.host_to_guest = nullptr;
     assert(gow3gpu_set_guest_memory_api(&incomplete_api) == -1);
     incomplete_api = api;
     incomplete_api.atomic_u64 = nullptr;
+    assert(gow3gpu_set_guest_memory_api(&incomplete_api) == -1);
+    incomplete_api = api;
+    incomplete_api.allocate_process_memory = nullptr;
     assert(gow3gpu_set_guest_memory_api(&incomplete_api) == -1);
     assert(gow3gpu_set_guest_memory_api(&api) == 0);
     assert(gow3gpu_set_guest_memory_api(&api) == -2);
@@ -208,6 +233,15 @@ int main() {
     assert(memory->GuestAddressFromHost(fake.bytes.data() + 6, guest_address));
     assert(guest_address == 0x1006 && fake.host_to_guest_calls == 1);
     assert(!memory->GuestAddressFromHost(nullptr, guest_address));
+    void* guest_host_pointer{};
+    assert(memory->AllocateProcessMemory(8, 8, "test-labels", guest_address,
+                                         guest_host_pointer));
+    assert(guest_address == 0x1008 && guest_host_pointer == fake.bytes.data() + 8 &&
+           fake.allocate_calls == 1);
+    assert(memory->ReleaseProcessMemory(guest_address, 8, guest_host_pointer) &&
+           fake.release_calls == 1);
+    assert(!memory->AllocateProcessMemory(8, 3, "invalid-alignment", guest_address,
+                                          guest_host_pointer));
     std::uint64_t atomic_value{};
     fake.wait_value = 0x12345678;
     assert(memory->AtomicLoad(0x2000, 4, atomic_value));

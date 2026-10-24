@@ -181,6 +181,59 @@ static int guest_writeback(void *user_context, uint64_t address,
   return recomp_guest_gpu_memory_write(ctx, address, source, (size_t)size);
 }
 
+static int guest_allocate_process_memory(void *user_context, uint64_t size,
+                                         uint64_t alignment, const char *name,
+                                         uint64_t *guest_address,
+                                         void **host_pointer) {
+  GuestContext *ctx = process_context(user_context);
+  if (!guest_address || !host_pointer) return 0;
+  *guest_address = 0;
+  *host_pointer = NULL;
+  if (!ctx || !size || !alignment ||
+      (alignment & (alignment - 1)) || size > SIZE_MAX ||
+      alignment > SIZE_MAX)
+    return 0;
+  size_t host_alignment = (size_t)alignment;
+  if (host_alignment < 4096) host_alignment = 4096;
+  if (size > SIZE_MAX - (host_alignment - 1)) return 0;
+
+  const uint64_t address = recomp_vm_alloc_named_aligned(
+      ctx, (size_t)size, host_alignment, PROT_READ | PROT_WRITE, 0,
+      name ? name : "gow3gpu-process-memory");
+  if (address == UINT64_MAX)
+    return 0;
+
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_gpu_memory_acquire(ctx, address, (size_t)size,
+                                       PROT_READ | PROT_WRITE, &lease)) {
+    (void)recomp_vm_free(ctx, address, (size_t)size);
+    return 0;
+  }
+  *guest_address = address;
+  *host_pointer = lease.host_pointer;
+  recomp_guest_memory_release(&lease);
+  return 1;
+}
+
+static int guest_release_process_memory(void *user_context,
+                                        uint64_t guest_address, uint64_t size,
+                                        void *host_pointer) {
+  GuestContext *ctx = process_context(user_context);
+  if (!ctx || !guest_address || !size || !host_pointer || size > SIZE_MAX)
+    return 0;
+
+  RecompGuestMemoryLease lease;
+  if (!recomp_guest_gpu_memory_acquire(ctx, guest_address, (size_t)size,
+                                       PROT_READ | PROT_WRITE, &lease))
+    return 0;
+  const int exact_mapping = lease.host_pointer == host_pointer;
+  recomp_guest_memory_release(&lease);
+  if (!exact_mapping)
+    return 0;
+
+  return recomp_vm_free(ctx, guest_address, (size_t)size) == 0;
+}
+
 static uint64_t guest_clamp_range(void *user_context, uint64_t address,
                                   uint64_t requested_size) {
   GuestContext *ctx = process_context(user_context);
@@ -364,6 +417,8 @@ int ps4_gow3gpu_install_runtime_apis(GuestContext *ctx,
       .clamp_range_size = guest_clamp_range,
       .gpu_protect = guest_gpu_protect,
       .install_gpu_hooks = install_gpu_hooks,
+      .allocate_process_memory = guest_allocate_process_memory,
+      .release_process_memory = guest_release_process_memory,
   };
   Gow3GpuHostRuntimeApi host_api = {
       .abi_version = GOW3GPU_HOST_RUNTIME_ABI_VERSION,

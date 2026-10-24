@@ -18,6 +18,8 @@
 namespace {
 struct GuestMemory {
     alignas(16) std::array<uint8_t, 0x50000> bytes{};
+    uint64_t allocation_address{0x40000};
+    uint64_t allocation_size{};
 };
 
 using SetGuestMemoryApi = int (*)(const Gow3GpuGuestMemoryApi*);
@@ -29,6 +31,9 @@ using SubmitCommandBuffers = int32_t (*)(uint32_t, const uint32_t* const*, uint3
                                          const uint32_t* const*, uint32_t*);
 using SubmitDone = int32_t (*)();
 using WaitIdle = int (*)(void);
+using VideoOutOpen = int32_t (*)(int32_t, int32_t, int32_t, const void*);
+using VideoOutGetBufferLabelAddress = int32_t (*)(int32_t, uintptr_t*);
+using VideoOutClose = int32_t (*)(int32_t);
 SubmitCommandBuffers g_candidate_submit = nullptr;
 
 template <typename T>
@@ -128,6 +133,27 @@ int InstallGpuHooks(void*, Gow3GpuGuestRangeHook map, Gow3GpuGuestRangeHook unma
                     Gow3GpuGuestRangeHook invalidate, void*) {
     return map && unmap && invalidate;
 }
+int AllocateProcessMemory(void* context, uint64_t size, uint64_t alignment,
+                          const char*, uint64_t* guest, void** host) {
+    auto* memory = static_cast<GuestMemory*>(context);
+    if (!memory || !guest || !host || !size || !alignment ||
+        (alignment & (alignment - 1)) || memory->allocation_size ||
+        (memory->allocation_address & (alignment - 1)) ||
+        !IsMapped(context, memory->allocation_address, size)) return 0;
+    memory->allocation_size = size;
+    *guest = memory->allocation_address;
+    *host = memory->bytes.data() + memory->allocation_address;
+    return 1;
+}
+int ReleaseProcessMemory(void* context, uint64_t guest, uint64_t size,
+                         void* host) {
+    auto* memory = static_cast<GuestMemory*>(context);
+    if (!memory || guest != memory->allocation_address ||
+        size != memory->allocation_size ||
+        host != memory->bytes.data() + memory->allocation_address) return 0;
+    memory->allocation_size = 0;
+    return 1;
+}
 
 int32_t VerifyAndSubmit(uint32_t count, const uint32_t** dcb_addresses,
                         uint32_t* dcb_sizes, const uint32_t** ccb_addresses,
@@ -183,6 +209,8 @@ int main(int argc, char** argv) {
         .clamp_range_size = ClampRange,
         .gpu_protect = GpuProtect,
         .install_gpu_hooks = InstallGpuHooks,
+        .allocate_process_memory = AllocateProcessMemory,
+        .release_process_memory = ReleaseProcessMemory,
     };
     GuestMemory guest_memory{};
     Gow3GpuGuestMemoryApi memory_api = api;
@@ -225,7 +253,15 @@ int main(int argc, char** argv) {
     const uintptr_t draw_index = resolve("HlTPoZ-oY7Y#libSceGnmDriver#libSceGnmDriver");
     const uintptr_t submit_address = resolve("zwY0YV91TTI#libSceGnmDriver#libSceGnmDriver");
     const uintptr_t submit_done_address = resolve("yvZ73uQUqrk#libSceGnmDriver#libSceGnmDriver");
-    if (count == 0 || draw_index == 0 || submit_address == 0 || submit_done_address == 0) {
+    const uintptr_t videoout_open_address =
+        resolve("Up36PTk687E#libSceVideoOut#libSceVideoOut");
+    const uintptr_t videoout_label_address =
+        resolve("OcQybQejHEY#libSceVideoOut#libSceVideoOut");
+    const uintptr_t videoout_close_address =
+        resolve("uquVH4-Du78#libSceVideoOut#libSceVideoOut");
+    if (count == 0 || draw_index == 0 || submit_address == 0 ||
+        submit_done_address == 0 || videoout_open_address == 0 ||
+        videoout_label_address == 0 || videoout_close_address == 0) {
         std::fprintf(stderr, "renderer initialized but GNM registration was incomplete\n");
         return 1;
     }
@@ -278,7 +314,39 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("{\"guest_memory_contract\":\"synthetic_mapped\",\"host_runtime_contract\":\"synthetic_callbacks\",\"renderer_init_returned\":true,\"gnm_symbols\":%u,\"draw_index_resolved\":true,\"synthetic_pm4_nop_submitted\":true,\"submit_result\":%d,\"submit_done_result\":%d,\"candidate_queue_drained\":true,\"guest_context_marshaller\":true,\"real_game_import_path\":false,\"driver_selected_by_loader\":true,\"teardown\":\"process_exit_only\",\"verdict\":\"PASS\"}\n", count, submit_result, submit_done_result);
+    const auto videoout_open = reinterpret_cast<VideoOutOpen>(videoout_open_address);
+    const auto videoout_get_label = reinterpret_cast<VideoOutGetBufferLabelAddress>(
+        videoout_label_address);
+    const auto videoout_close = reinterpret_cast<VideoOutClose>(videoout_close_address);
+    const int32_t videoout_handle = videoout_open(0, 0, 0, nullptr);
+    uintptr_t label_guest_address = 0;
+    uint64_t translated_label_address = 0;
+    if (videoout_handle != 1 ||
+        videoout_get_label(videoout_handle, &label_guest_address) != 16 ||
+        label_guest_address != guest_memory.allocation_address ||
+        !HostToGuest(&guest_memory,
+                     guest_memory.bytes.data() + label_guest_address,
+                     &translated_label_address) ||
+        translated_label_address != label_guest_address) {
+        std::fprintf(stderr,
+                     "VideoOut label import did not return the allocated guest VA\n");
+        return 1;
+    }
+    auto* videoout_labels = reinterpret_cast<uint64_t*>(
+        guest_memory.bytes.data() + label_guest_address);
+    videoout_labels[2] = 0x1122334455667788ULL;
+    uint64_t observed_label = 0;
+    if (!memory_api.atomic_load(memory_api.user_context,
+                                label_guest_address + 2 * sizeof(uint64_t),
+                                sizeof(uint64_t), &observed_label) ||
+        observed_label != videoout_labels[2] ||
+        videoout_close(videoout_handle) != 0) {
+        std::fprintf(stderr,
+                     "VideoOut label guest VA and host view did not alias\n");
+        return 1;
+    }
+
+    std::printf("{\"guest_memory_contract\":\"synthetic_mapped\",\"host_runtime_contract\":\"synthetic_callbacks\",\"renderer_init_returned\":true,\"gnm_symbols\":%u,\"draw_index_resolved\":true,\"synthetic_pm4_nop_submitted\":true,\"submit_result\":%d,\"submit_done_result\":%d,\"candidate_queue_drained\":true,\"guest_context_marshaller\":true,\"videoout_label_guest_va\":%llu,\"host_guest_label_alias\":true,\"real_game_import_path\":false,\"driver_selected_by_loader\":true,\"teardown\":\"process_exit_only\",\"verdict\":\"PASS\"}\n", count, submit_result, submit_done_result, static_cast<unsigned long long>(label_guest_address));
     std::fflush(stdout);
 
     // This candidate API does not export a shutdown function, and its SDL

@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -39,6 +40,73 @@ static int g_primary_flip_notifications;
 static int32_t g_flip_handle;
 static int32_t g_flip_buffer;
 static int64_t g_flip_arg;
+
+/* Minimal VM allocator for this adapter-only smoke target. The production
+ * callback calls the real recomp_vm_alloc_named_aligned/recomp_vm_free. */
+uint64_t recomp_vm_alloc_named_aligned(GuestContext *context, size_t size,
+                                       size_t alignment, int prot, int flags,
+                                       const char *name) {
+  GuestContext *ctx = context->process_ctx ? context->process_ctx : context;
+  if (!ctx || !size || !alignment || (alignment & (alignment - 1)) ||
+      alignment > SIZE_MAX)
+    return UINT64_MAX;
+  if (alignment < 4096) alignment = 4096;
+  if (size > SIZE_MAX - (alignment - 1)) return UINT64_MAX;
+  const size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
+  pthread_mutex_lock(&ctx->vm_mutex);
+  GuestVMExtent *extent = ctx->vm_extents;
+  while (extent && (!extent->is_free || extent->size < aligned_size))
+    extent = extent->next;
+  if (!extent) {
+    pthread_mutex_unlock(&ctx->vm_mutex);
+    return UINT64_MAX;
+  }
+  if (extent->size > aligned_size) {
+    GuestVMExtent *tail = calloc(1, sizeof(*tail));
+    if (!tail) {
+      pthread_mutex_unlock(&ctx->vm_mutex);
+      return UINT64_MAX;
+    }
+    tail->addr = extent->addr + aligned_size;
+    tail->size = extent->size - aligned_size;
+    tail->is_free = true;
+    tail->prev = extent;
+    tail->next = extent->next;
+    if (tail->next) tail->next->prev = tail;
+    extent->next = tail;
+    extent->size = aligned_size;
+  }
+  extent->is_free = false;
+  extent->prot = prot;
+  extent->flags = flags;
+  if (name) snprintf(extent->name, sizeof(extent->name), "%s", name);
+  const uint64_t address = extent->addr;
+  pthread_mutex_unlock(&ctx->vm_mutex);
+  ps4_gow3gpu_guest_map(address, aligned_size);
+  return address;
+}
+
+int recomp_vm_free(GuestContext *context, uint64_t address, size_t size) {
+  GuestContext *ctx = context->process_ctx ? context->process_ctx : context;
+  if (!ctx || !address || !size || size > SIZE_MAX - 4095) return -1;
+  const uint64_t start = address & ~4095ULL;
+  const size_t aligned_size = (size + 4095) & ~(size_t)4095;
+  pthread_mutex_lock(&ctx->vm_mutex);
+  GuestVMExtent *extent = ctx->vm_extents;
+  while (extent && (extent->addr != start || extent->is_free ||
+                    extent->is_pinned || extent->size != aligned_size))
+    extent = extent->next;
+  if (!extent) {
+    pthread_mutex_unlock(&ctx->vm_mutex);
+    return -1;
+  }
+  extent->is_free = true;
+  extent->prot = 0;
+  extent->name[0] = '\0';
+  pthread_mutex_unlock(&ctx->vm_mutex);
+  ps4_gow3gpu_guest_unmap(start, aligned_size);
+  return 0;
+}
 
 void ps4_gnm_notify_eop(void) { g_primary_eop_notifications++; }
 
@@ -263,6 +331,38 @@ int main(void) {
       g_last_size != 0x2000)
     return fail("CPU-write invalidation");
 
+  /* The GPU-owned VideoOut labels must be represented in the same guest VA
+   * space used by PM4 WAIT_REG_MEM and EOP writes. */
+  uint64_t label_guest_address = 0;
+  void *label_host_pointer = NULL;
+  if (!g_memory_api.allocate_process_memory(
+          &ctx, 16 * sizeof(uint64_t), 4096, "smoke-videoout-labels",
+          &label_guest_address, &label_host_pointer) ||
+      label_guest_address != 0x14000 ||
+      label_host_pointer != memory + label_guest_address ||
+      !g_memory_api.is_mapped(&ctx, label_guest_address, 16 * sizeof(uint64_t)) ||
+      g_map_count != 4 || g_last_address != label_guest_address ||
+      g_last_size != 0x1000)
+    return fail("allocate labels in authoritative guest mapping");
+  uint64_t *labels = (uint64_t *)label_host_pointer;
+  labels[2] = 0x1122334455667788ULL;
+  loaded = 0;
+  if (!g_memory_api.atomic_load(&ctx, label_guest_address + 2 * sizeof(uint64_t),
+                                sizeof(uint64_t), &loaded) ||
+      loaded != labels[2])
+    return fail("guest VA wait reads VideoOut host label bytes");
+  const uint64_t completed_label = 1;
+  if (!g_memory_api.writeback(&ctx, label_guest_address + 2 * sizeof(uint64_t),
+                              &completed_label, sizeof(completed_label)) ||
+      labels[2] != completed_label)
+    return fail("EOP guest write updates VideoOut host label bytes");
+  if (!g_memory_api.release_process_memory(
+          &ctx, label_guest_address, 16 * sizeof(uint64_t), label_host_pointer) ||
+      g_memory_api.is_mapped(&ctx, label_guest_address, 16 * sizeof(uint64_t)) ||
+      g_unmap_count != 2 || g_last_address != label_guest_address ||
+      g_last_size != 0x1000)
+    return fail("release guest-backed VideoOut labels after GPU use");
+
   int32_t *host_errno = g_host_api.errno_address(&ctx);
   if (!host_errno || g_host_api.process_time_us(&ctx) != 123456 ||
       g_host_api.process_time_counter(&ctx) != 654321 ||
@@ -327,6 +427,6 @@ int main(void) {
 
   pthread_mutex_destroy(&ctx.vm_mutex);
   munmap(memory, memory_size);
-  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"reentrant_guest_memory_lease\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"eop_and_flip_forwarding\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
+  puts("{\"primary_guest_memory_adapter\":\"PASS\",\"reentrant_guest_memory_lease\":\"PASS\",\"host_runtime_adapter\":\"PASS\",\"guest_backed_videoout_labels\":\"PASS\",\"eop_and_flip_forwarding\":\"PASS\",\"guest_context_gnm_marshalling\":\"PASS\",\"retained_pm4_lifetime\":\"PASS\",\"unmapped_submit_rejected\":\"PASS\",\"m2_page_protection\":\"PASS\",\"verdict\":\"PASS\"}");
   return 0;
 }

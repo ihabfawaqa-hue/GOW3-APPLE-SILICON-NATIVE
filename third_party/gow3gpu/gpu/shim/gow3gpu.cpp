@@ -96,7 +96,8 @@ extern "C" int gow3gpu_set_guest_memory_api(const Gow3GpuGuestMemoryApi* api) {
         api->struct_size < sizeof(Gow3GpuGuestMemoryApi) || !api->is_mapped ||
         !api->host_to_guest || !api->query_region || !api->read || !api->atomic_load ||
         !api->atomic_u64 || !api->writeback ||
-        !api->clamp_range_size || !api->gpu_protect || !api->install_gpu_hooks) {
+        !api->clamp_range_size || !api->gpu_protect || !api->install_gpu_hooks ||
+        !api->allocate_process_memory || !api->release_process_memory) {
         return -1;
     }
     std::scoped_lock lock{g_guest_memory_api_mutex};
@@ -163,6 +164,37 @@ bool MemoryManager::GuestAddressFromHost(const void* host_pointer, VAddr& guest_
     }
     guest_address = static_cast<VAddr>(address);
     return true;
+}
+bool MemoryManager::AllocateProcessMemory(u64 size, u64 alignment, const char* name,
+                                          VAddr& guest_address, void*& host_pointer) {
+    Gow3GpuGuestMemoryApi api{};
+    guest_address = 0;
+    host_pointer = nullptr;
+    if (!size || !alignment || (alignment & (alignment - 1)) ||
+        !GetGuestMemoryApi(api)) return false;
+    uint64_t api_guest_address = 0;
+    if (!api.allocate_process_memory(api.user_context, size, alignment, name,
+                                     &api_guest_address, &host_pointer)) return false;
+    uint64_t translated_address = 0;
+    if (!host_pointer || !api.is_mapped(api.user_context, api_guest_address, size) ||
+        !api.host_to_guest(api.user_context, host_pointer, &translated_address) ||
+        translated_address != api_guest_address) {
+        if (host_pointer) {
+            api.release_process_memory(api.user_context, api_guest_address, size,
+                                       host_pointer);
+        }
+        host_pointer = nullptr;
+        return false;
+    }
+    guest_address = static_cast<VAddr>(api_guest_address);
+    return true;
+}
+bool MemoryManager::ReleaseProcessMemory(VAddr guest_address, u64 size,
+                                        void* host_pointer) {
+    Gow3GpuGuestMemoryApi api{};
+    return guest_address && size && host_pointer && GetGuestMemoryApi(api) &&
+           api.release_process_memory(api.user_context, guest_address, size,
+                                     host_pointer) != 0;
 }
 bool MemoryManager::AtomicLoad(VAddr address, u32 size, u64& value) {
     Gow3GpuGuestMemoryApi api{};

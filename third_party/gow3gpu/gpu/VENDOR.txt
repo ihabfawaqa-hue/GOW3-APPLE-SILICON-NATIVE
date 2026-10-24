@@ -8,3 +8,18 @@ Backported from upstream after b4e7ae7 (2026-10-02), recompiler correctness fixe
   mode (#5126), e518a6515 S_SUBB_U32 SCC wrap (#5031), 282e5c792 S_ADDC_U32 SCC carry-out (#5030),
   fb6367d29 32-bit literals in the high dword of 64-bit floats (#5114), 94e217781 V_BFM_B32 (#5185),
   d1cb90dbb ADDC (#5200), dd43d1cac V_CVT_PK_U8_F32 (#5194), ef08b1e1f V_ALIGNBIT/ALIGNBYTE (#5186).
+
+Local integration patches (GPL-2.0-or-later files remain under the upstream license):
+  - Versioned guest-memory ABI v2 adds process guest-VM allocation/release callbacks;
+    VideoOut flip labels use a guest VA plus a stable host view from the primary runtime.
+    This replaces the upstream host-heap label address that PM4 WAIT_REG_MEM/EOP could
+    not resolve through the primary runtime's guest address space.
+  - Host-runtime ABI v2 forwards ordered Liverpool EOP and completed VideoOut flips to
+    the primary runtime's equeue/state owners.
+  - Local GoW3 shader, image-alias, depth/stencil, blend, presenter, and synchronization
+    changes are marked with `gow3:` in source. See the associated regression tests under
+    `tests/` and runtime adapter probes under `scripts/lab/probes/gow3gpu/`.
+
+Build target: native Apple Silicon arm64 macOS, CMake/Ninja, C++20 video core, Vulkan
+loader supplied by the selected host driver. An arm64 dylib build is not evidence that
+the host Vulkan implementation passes the renderer feature/workload probe.

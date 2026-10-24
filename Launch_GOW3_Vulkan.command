@@ -12,9 +12,12 @@ export PS4_SCREENSHOT_DIR="${PS4_SCREENSHOT_DIR:-./screenshots}"
 export PS4_SCREENSHOT_EVERY="${PS4_SCREENSHOT_EVERY:-60}"
 
 LAB_DIR="$HOME/Library/Application Support/GOW3Lab"
+# Versioned GPU library and KosmicKrisp driver (scripts/lab/install_runtime.sh); repoint
+# runtime/current at an older version, or set these variables, to roll back.
+RUNTIME_DIR="$LAB_DIR/runtime/current"
 export PS4_GOW3GPU_BACKEND=gow3gpu-vulkan
-export PS4_GOW3GPU_LIBRARY="${PS4_GOW3GPU_LIBRARY:-/tmp/gow3gpu-arm64-dense-range-build/libgow3gpu.dylib}"
-export VK_DRIVER_FILES="${VK_DRIVER_FILES:-/tmp/mesa-kosmickrisp-install312/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json}"
+export PS4_GOW3GPU_LIBRARY="${PS4_GOW3GPU_LIBRARY:-$RUNTIME_DIR/libgow3gpu.dylib}"
+export VK_DRIVER_FILES="${VK_DRIVER_FILES:-$RUNTIME_DIR/kosmickrisp_icd.json}"
 export PS4_GOW3GPU_USER_DIR="${PS4_GOW3GPU_USER_DIR:-$LAB_DIR/candidate-user}"
 export GOW3_GPU_USER_DIR="${GOW3_GPU_USER_DIR:-$PS4_GOW3GPU_USER_DIR}"
 
@@ -22,6 +25,7 @@ echo "=========================================================="
 echo "  God of War III Remastered - Native Apple Silicon ARM64  "
 echo "  Graphics: GoW3/shadPS4 Vulkan (KosmicKrisp)            "
 echo "  Asset Root: $GOW3_DIR"
+echo "  GPU runtime: $(readlink "$RUNTIME_DIR" 2>/dev/null || echo "$PS4_GOW3GPU_LIBRARY")"
 echo "=========================================================="
 
 missing=0
@@ -32,7 +36,7 @@ for path in "$GOW3_DIR" "$PS4_GOW3GPU_LIBRARY" "$VK_DRIVER_FILES"; do
     fi
 done
 if [ "$missing" -ne 0 ]; then
-    echo "[!] Mount the game volume and rebuild the GPU library / KosmicKrisp driver if /tmp was cleared."
+    echo "[!] Mount the game volume, or install the GPU runtime: scripts/lab/install_runtime.sh"
     read -p "Press Enter to exit..."
     exit 1
 fi

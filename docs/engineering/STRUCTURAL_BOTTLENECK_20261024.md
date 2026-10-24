@@ -203,3 +203,76 @@ passes. Per-draw and per-shader cost is the next level: a bounded Metal GPU capt
 vertex-only draws inside the scene pass (a pipeline variant with the scene's attachment
 formats and writes disabled) so the scene's MSAA targets are not stored and reloaded ten times
 a frame.
+
+# Part 3: vertex-only draws, shader-level cost, and the Argon changes (2026-10-25)
+
+## Vertex-only draws: skipped, not merged
+
+The ~10 attachment-less draws per frame (vertex shader `c82987896214bdaa`, no pixel shader, no
+color or depth target) do not kill rasterization (`dx_rasterization_kill` was 0 for all of
+them), so running them inside the scene pass would have needed a pipeline variant and would
+have changed nothing visible. Their only GCN-visible result is an occlusion (ZPASS) count, and
+the command processor synthesizes those counts on the CPU. `Rasterizer::IsInvisibleDraw` now
+returns before recording a draw with no attachments, no pixel shader, no stream-out and no
+shader memory writes (`GOW3_RECORD_INVISIBLE_DRAWS=1` records them). About 9 of the ~21
+target-change pass ends per frame go away. The combat frame is unchanged. The frame rate did
+not measurably change: in normal submission the scene pass store/reload around these draws was
+not the cost the per-pass mode had suggested.
+
+## Shader-level cost
+
+- **Metal GPU capture:** not usable. A one-frame capture (`MESA_KK_CAPTURE_FRAME=1`, driver patch)
+  crashes in Apple's `GPUToolsCapture` while `stopCapture` serializes KosmicKrisp's Metal 4
+  argument tables (`GTTraceDispatch_createArgumentTableStateMap`, null dereference).
+- **Per-pixel-shader GPU time instead:** `GOW3_DIAGNOSTIC_PASS_SUBMIT=2` also submits when the
+  pixel shader changes and adds the hash to the label. Guest compute dispatches (and host work
+  hooked to them, such as the upscaler) get their own commits in both modes. In that mode (it
+  inflates totals: ~196 ms of GPU per frame):
+
+| Pixel shader | Targets | GPU ms/frame | Per draw | Notes |
+|---|---|---:|---:|---|
+| `c9faf22f47bfb5ca` | 960×540 RGBA8 UNORM | 46.8 | ~19 ms | 33 texture samples per pixel |
+| `e14d91c27ca8102c` | 1920×1080 RGBA8 sRGB | 23.3 | ~9 ms | 8 samples per pixel |
+| next largest | | ≤ 7.3 | | |
+
+  These were measured before compute was split out, so they may include FSR work that ran in
+  the same commit.
+- **Generated Metal source:** `MESA_KK_MSL_DIR=<dir>` (driver patch) dumps each compiled shader.
+  The 33-sample shader (`00609_FS.msl`) reloads the texture and sampler descriptor from memory
+  for every sample, null-checks the texture, bounds-checks every constant load, and runs every
+  operation under `#pragma METAL fp math_mode(safe)`. That is real per-sample overhead, but at
+  960×540 × 33 samples it does not explain ~19 ms by itself.
+
+## Review of the Argon (Gemini) changes
+
+A first bisect looked like a regression: runs did not reach gameplay by 175 s. It was the
+harness. Across every run since the morning, the second intro movie ends at either ~115–120 s
+(an automatic Cross press skipped it) or ~171–177 s (played in full), so a 180 s run sometimes
+just reaches gameplay. Runs must be judged at 250 s. One run (`run_20261024_221002`) did hang
+for good, with the movie decode thread inside `sceVideodecDecode` and a FIOS file thread inside
+`sceKernelPread` both blocked on host mutexes. Its build had the videodec change below.
+
+| Change | Decision | Reason |
+|---|---|---|
+| AJM: instance limit 128 → 16384, batches 1024, SDK-order control parsing, split input buffers, gapless superframe drain, planar AT9 indexing, per-instance lock, multi-frame without an MFrame sideband | kept | A user session hit 1.77 million `80000004` errors from six decoder objects (the limit); the opening's audio decodes and plays; untested beyond the opening |
+| VBlank, flip and EOP events coalesced (trigger instead of post) | kept | kqueue `EV_CLEAR` semantics; no progression difference with or without |
+| Key events forwarded from an NSEvent local monitor | kept | input latency fix; needs a hands-on check |
+| `ReadMemory`/`OnWriteFault` drain after the mapping check | kept | equivalent; skips drains for unmapped memory |
+| Videodec: picture written to guest memory while holding `g_decoder_mutex` (scratch reuse) | rejected | in the one real hang; saves one 3 MB allocation per movie frame |
+| Audio ring 2×len+1024 → 8×len+4096 | rejected | about 96 ms more audio latency; underruns were already 1 per run |
+| Defaults: upscaler, object motion, jitter, sharpening, RCAS and vsync off | rejected | 7.0–7.3 FPS against 8.7–9.0 with the old defaults in the same segment |
+| Deferred and stale readbacks on by default | rejected | readback waits measured 0.0 ms; stale reads were opt-in on purpose |
+| Launcher prefers a `build/runtime` snapshot | rejected | silently shadows every installed runtime |
+| Begin-memo stores the post-clear state | rejected | the signature has no clear state: a clear while the pass is open could be skipped |
+| Scheduler strips clear flags after `beginRendering` | rejected | duplicates `RenderState::ContinuesWith`, disables its A/B toggle |
+
+Rejected changes are kept as patches in `scripts/lab/patches/rejected/`.
+
+## Performance note
+
+Back to back on a warm machine, the previous GPU runtime (`20261024-232612`) measured 8.9–9.5 FPS
+and the committed build 7.9–8.3 FPS at 2,800–3,000 draws per frame. Readings drifted down
+about 1 FPS over the hour for both, and run-to-run noise at similar draw counts is about
+±0.5 FPS. The committed GPU code differs from that runtime by the equivalent fault/read
+reordering and environment-gated diagnostics; the bundled KosmicKrisp adds opt-in capture,
+MSL-dump and timing code. The gap is open and needs interleaved runs on a cool machine.

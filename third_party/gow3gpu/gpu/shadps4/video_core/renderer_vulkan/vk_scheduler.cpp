@@ -205,6 +205,19 @@ void Scheduler::EndRendering(std::source_location caller) {
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
 }
 
+void Scheduler::LabelCommandBuffer(std::string label) {
+    if (!PassLabelsEnabled()) {
+        return;
+    }
+    if (!recording_threaded) {
+        SetObjectName(instance.GetDevice(), current_cmdbuf, label);
+        return;
+    }
+    Record([device = instance.GetDevice(), label = std::move(label)](vk::CommandBuffer cmdbuf) {
+        SetObjectName(device, cmdbuf, label);
+    });
+}
+
 void Scheduler::TraceDirectRecording(void* caller) {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_RECORDER_TRACE");

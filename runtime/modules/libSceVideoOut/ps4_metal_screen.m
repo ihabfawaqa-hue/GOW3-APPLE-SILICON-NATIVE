@@ -82,6 +82,27 @@ void ps4_host_run_main_loop(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged)
+                                              handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
+            if (event.type == NSEventTypeKeyDown) {
+                if ((event.modifierFlags & NSEventModifierFlagCommand) && event.keyCode == 12) {
+                    ps4_host_quit(0);
+                }
+                extern void ps4_pad_handle_key(unsigned short keyCode, int isDown);
+                ps4_pad_handle_key(event.keyCode, 1);
+                extern void ps4_keyboard_handle_key(unsigned short keyCode, int isDown, NSUInteger modifierFlags);
+                ps4_keyboard_handle_key(event.keyCode, 1, event.modifierFlags);
+            } else if (event.type == NSEventTypeKeyUp) {
+                extern void ps4_pad_handle_key(unsigned short keyCode, int isDown);
+                ps4_pad_handle_key(event.keyCode, 0);
+                extern void ps4_keyboard_handle_key(unsigned short keyCode, int isDown, NSUInteger modifierFlags);
+                ps4_keyboard_handle_key(event.keyCode, 0, event.modifierFlags);
+            } else if (event.type == NSEventTypeFlagsChanged) {
+                extern void ps4_keyboard_handle_flags(NSUInteger modifierFlags);
+                ps4_keyboard_handle_flags(event.modifierFlags);
+            }
+            return event;
+        }];
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0/60.0 repeats:YES block:^(NSTimer * _Nonnull t) {
             metal_screen_pump_events_main();
         }];
@@ -1151,6 +1172,7 @@ void ps4_metal_screen_pump_events(void) {
 }
 
 static void metal_screen_pump_events_main(void) {
+    if (!g_inited) return;
     @autoreleasepool {
         NSEvent *event;
         while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny

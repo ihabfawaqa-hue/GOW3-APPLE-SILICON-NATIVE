@@ -55,3 +55,14 @@ python3 scripts/lab/pass_gpu_times.py kk_times.csv bench.csv 300
 binds anything), so each commit holds one pass plus the work up to the next. It multiplies
 submissions; use it only for attribution. `GOW3_PERF_DIAG=1` also prints `Pass end:` lines:
 where render passes were ended, and how often the same pass resumed right after (a split).
+
+`GOW3_DIAGNOSTIC_PASS_SUBMIT=2` also submits when the pixel shader changes and adds `ps=<hash>`
+to the label (per-shader GPU time; the extra pass breaks add attachment loads and stores).
+Guest compute dispatches get commits of their own (`compute cs=<hash>`) in both modes.
+The driver patch also adds `MESA_KK_MSL_DIR=<dir>` (each compiled shader's Metal source) and
+`MESA_KK_CAPTURE_FRAME=1` with `MESA_KK_CAPTURE_TRIGGER=<file>` (a one-frame Metal capture;
+currently it crashes in Apple's GPUToolsCapture on stop with KosmicKrisp's Metal 4 argument
+tables).
+
+Judge progression at 250 s: the second intro movie ends at ~115–120 s when an auto-press skips
+it and at ~171–177 s when it plays in full.

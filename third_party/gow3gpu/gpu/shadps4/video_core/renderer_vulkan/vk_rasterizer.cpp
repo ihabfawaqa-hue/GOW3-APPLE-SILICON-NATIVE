@@ -1185,24 +1185,72 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
 // targets change, before the draw binds anything, so each Metal commit holds one pass (plus the
 // work up to the next one). With MESA_KK_GPU_TIMES the driver then logs GPU time per pass.
 // Diagnostic only: it multiplies submissions.
-void Rasterizer::DiagnosticPassSubmit() {
-    static const bool pass_submit = [] {
+void Rasterizer::DiagnosticPassSubmit(const GraphicsPipeline* pipeline) {
+    // 1: submit when the render targets change. 2: also when the pixel shader changes (per-shader
+    // GPU time; the extra pass breaks add attachment loads and stores to each commit).
+    static const int pass_submit = [] {
         const char* value = std::getenv("GOW3_DIAGNOSTIC_PASS_SUBMIT");
-        return value && value[0] == '1' && Scheduler::PassLabelsEnabled();
+        return value && Scheduler::PassLabelsEnabled() ? std::atoi(value) : 0;
     }();
     if (!pass_submit) {
         return;
     }
-    std::array<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1> targets{};
+    std::array<u64, AmdGpu::NUM_COLOR_BUFFERS + 2> targets{};
     for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
-        targets[cb] = cb_descs[cb].first;
+        targets[cb] = cb_descs[cb].first.index;
     }
-    targets.back() = db_desc.first;
+    targets[AmdGpu::NUM_COLOR_BUFFERS] = db_desc.first.index;
+    if (pass_submit >= 2) {
+        targets.back() = pipeline->GetGraphicsKey().stage_hashes[static_cast<u32>(Shader::SwStage::Fragment)];
+    }
     if (targets != diagnostic_pass_targets) {
         diagnostic_pass_targets = targets;
         scheduler.EndRendering();
         scheduler.Flush();
     }
+}
+
+// gow3: draws with nothing to show for them. God of War III issues about ten a frame in
+// gameplay: a vertex shader only (no pixel shader), no color or depth target, rasterization on.
+// The only result such a draw has on GCN is its occlusion (ZPASS) count, and occlusion counts
+// here are synthesized by the command processor, not read from the GPU. Each one still began a
+// render pass of its own, ending the scene's 2x MSAA pass around it: a store and reload of its
+// color and depth, ~18 ms of GPU time a frame measured with per-pass timing. Draws whose shaders
+// write memory (buffers, images, atomics) or that stream out are still recorded.
+// GOW3_RECORD_INVISIBLE_DRAWS=1 records them all.
+bool Rasterizer::IsInvisibleDraw(const GraphicsPipeline& pipeline) {
+    static const bool record_all = [] {
+        const char* value = std::getenv("GOW3_RECORD_INVISIBLE_DRAWS");
+        return value && value[0] == '1';
+    }();
+    const auto& key = pipeline.GetGraphicsKey();
+    if (record_all || key.num_color_attachments != 0 || key.mrt_mask != 0 ||
+        key.z_format != AmdGpu::DepthBuffer::ZFormat::Invalid ||
+        key.stencil_format != AmdGpu::DepthBuffer::StencilFormat::Invalid ||
+        key.stage_hashes[static_cast<u32>(Shader::SwStage::Fragment)] != 0 ||
+        Regs().vgt_strmout_config.raw != 0) {
+        return false;
+    }
+    for (const auto* stage : pipeline.GetStages()) {
+        if (!stage) {
+            continue;
+        }
+        if (stage->has_storage_images) {
+            return false;
+        }
+        for (const auto& buffer : stage->buffers) {
+            if (buffer.is_written) {
+                return false;
+            }
+        }
+        for (const auto& image : stage->images) {
+            if (image.is_written || image.is_atomic) {
+                return false;
+            }
+        }
+    }
+    ++Gow3Stats::invisible_draws;
+    return true;
 }
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
@@ -1247,8 +1295,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
     motion_geometry = 0;
 
+    if (IsInvisibleDraw(*pipeline)) {
+        bind_prepared = nullptr;
+        draw_inputs.pending = false;
+        return;
+    }
+
     PrepareRenderState(pipeline);
-    DiagnosticPassSubmit();
+    DiagnosticPassSubmit(pipeline);
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
@@ -1479,7 +1533,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     motion_draw = false;
     motion_geometry = 0;
     PrepareRenderState(pipeline);
-    DiagnosticPassSubmit();
+    DiagnosticPassSubmit(pipeline);
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
         const auto& viewport = Regs().viewports[0];
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
@@ -1587,6 +1641,18 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     const auto& cs_program = CsRegs();
 
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    // gow3: GOW3_DIAGNOSTIC_PASS_SUBMIT: a commit of its own for the dispatch and the host work
+    // hooked to it (the upscaler runs before a guest compute shader).
+    static const bool dispatch_submit = [] {
+        const char* value = std::getenv("GOW3_DIAGNOSTIC_PASS_SUBMIT");
+        return value && std::atoi(value) >= 1 && Scheduler::PassLabelsEnabled();
+    }();
+    if (dispatch_submit) {
+        scheduler.EndRendering();
+        scheduler.Flush();
+        scheduler.LabelCommandBuffer(fmt::format("compute cs={:x}", cs.pgm_hash));
+        diagnostic_pass_targets = {};
+    }
     // After the resource binding: its transfers (image uploads, downloads) mark themselves.
     const auto mark = [&] {
         if (auto* profiler = GpuProfiler::Get()) {
@@ -1624,6 +1690,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
         cmdbuf.dispatch(dim_x, dim_y, dim_z);
     });
+    if (dispatch_submit) {
+        scheduler.Flush();
+    }
     DebugState.IncDispatch();
 
     ResetBindings(true);
@@ -3021,6 +3090,9 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         for (u32 i = 0; i < state.num_color_attachments; ++i) {
             clears |= state.color_attachments[i].is_clear != 0;
         }
+        // A clearing draw is not memoized: the signature does not cover clear state, so a
+        // later clear of the same targets while this pass is open would hit the memo and be
+        // skipped. (The draws after it continue the pass anyway: RenderState::ContinuesWith.)
         if (!clears) {
             // Recomputed after the full path: it may have started the scene (scene_started).
             begin_memo = {true, MakeBeginSignature(pipeline), state, push_data.scene_size,
@@ -3377,6 +3449,14 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             label += " depth";
             describe(db_desc.first);
         }
+        static const bool label_shader = [] {
+            const char* value = std::getenv("GOW3_DIAGNOSTIC_PASS_SUBMIT");
+            return value && std::atoi(value) >= 2;
+        }();
+        if (label_shader) {
+            label += fmt::format(" ps={:x}", pipeline->GetGraphicsKey().stage_hashes[static_cast<u32>(
+                                              Shader::SwStage::Fragment)]);
+        }
         if (label == "pass") {
             // No texture-cache attachment: say what the pass does draw into.
             const auto& gkey = pipeline->GetGraphicsKey();
@@ -3549,7 +3629,6 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
 }
 
 bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
-    DrainDrawPipe();
     if (!InvalidateMemory(addr, 8, assume_locks)) {
         return false;
     }
@@ -3558,11 +3637,11 @@ bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
-    DrainDrawPipe();
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
+    DrainDrawPipe();
     const bool image_readback =
         texture_cache.ResolveReadbacks(addr, size, assume_locks, VideoCore::ReadbackSource::CpuRead);
     if (!image_readback || buffer_cache.IsRegionGpuModified(addr, size)) {

@@ -1,0 +1,79 @@
+diff --git a/runtime/modules/libSceVideodec/ps4_videodec.c b/runtime/modules/libSceVideodec/ps4_videodec.c
+index e5acb21..b4a0643 100644
+--- a/runtime/modules/libSceVideodec/ps4_videodec.c
++++ b/runtime/modules/libSceVideodec/ps4_videodec.c
+@@ -53,6 +53,8 @@ _Static_assert(sizeof(Ps4VideodecPictureInfo) == 112,
+ typedef struct Ps4VideodecInstance {
+   AVCodecContext *codec;
+   struct SwsContext *scaler;
++  uint8_t *scratch_nv12;
++  size_t scratch_nv12_cap;
+   uint64_t generation;
+   uint64_t max_frame_buffer_size;
+   uint32_t max_width;
+@@ -110,6 +112,9 @@ static void destroy_instance_locked(Ps4VideodecInstance *instance) {
+   avcodec_free_context(&instance->codec);
+   sws_freeContext(instance->scaler);
+   instance->scaler = NULL;
++  free(instance->scratch_nv12);
++  instance->scratch_nv12 = NULL;
++  instance->scratch_nv12_cap = 0;
+   instance->max_frame_buffer_size = 0;
+   instance->max_width = 0;
+   instance->max_height = 0;
+@@ -205,9 +210,15 @@ static int32_t convert_frame_to_nv12(Ps4VideodecInstance *instance,
+       total_size > PS4_VIDEODEC_MAX_FRAME_SIZE || total_size > SIZE_MAX)
+     return (int32_t)ORBIS_VIDEODEC_ERROR_FRAME_BUFFER_SIZE;
+ 
+-  uint8_t *pixels = (uint8_t *)calloc(1, (size_t)total_size);
+-  if (!pixels)
+-    return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
++  if (instance->scratch_nv12_cap < (size_t)total_size) {
++    uint8_t *grown =
++        (uint8_t *)realloc(instance->scratch_nv12, (size_t)total_size);
++    if (!grown)
++      return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
++    instance->scratch_nv12 = grown;
++    instance->scratch_nv12_cap = (size_t)total_size;
++  }
++  uint8_t *pixels = instance->scratch_nv12;
+   uint8_t *dst[4] = {pixels, pixels + y_size, NULL, NULL};
+   int dst_linesize[4] = {(int)pitch, (int)pitch, 0, 0};
+   instance->scaler = sws_getCachedContext(
+@@ -215,7 +226,6 @@ static int32_t convert_frame_to_nv12(Ps4VideodecInstance *instance,
+       (enum AVPixelFormat)frame->format, frame->width, frame->height,
+       AV_PIX_FMT_NV12, SWS_BILINEAR, NULL, NULL, NULL);
+   if (!instance->scaler) {
+-    free(pixels);
+     return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
+   }
+ 
+@@ -224,7 +234,6 @@ static int32_t convert_frame_to_nv12(Ps4VideodecInstance *instance,
+                              frame->linesize, 0, frame->height, dst,
+                              dst_linesize);
+   if (rows != frame->height) {
+-    free(pixels);
+     return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
+   }
+ 
+@@ -560,16 +569,15 @@ static int32_t decode_one(GuestContext *ctx, uint64_t control_addr,
+                 picture.frame_height, picture.pts);
+       }
+     }
++    if (result == 0) {
++      result = write_picture(ctx, picture_addr, &framebuffer, &picture, pixels,
++                             pixels_size);
++    }
+   }
+   pthread_mutex_unlock(&g_decoder_mutex);
+   av_frame_free(&frame);
+   av_packet_free(&packet);
+ 
+-  if (result == 0) {
+-    result = write_picture(ctx, picture_addr, &framebuffer, &picture, pixels,
+-                           pixels_size);
+-  }
+-  free(pixels);
+   return result;
+ }
+ 

@@ -134,6 +134,8 @@ struct WaitTimer {
 /// Monotonic (GOW3_BENCHMARK_CSV): GPU command thread wall time in WAIT_REG_MEM while the
 /// condition was unmet, and guest submit calls blocked by the sceGnmSubmitDone lock.
 inline std::atomic<std::uint64_t> regmem_wait_ns{0}, regmem_waits{0}, submit_lock_ns{0};
+/// Draws not recorded because nothing could observe them (Rasterizer::IsInvisibleDraw).
+inline std::atomic<std::uint64_t> invisible_draws{0};
 /// GPU thread rusage, refreshed after each graphics submission.
 inline std::atomic<std::uint64_t> gpu_sys_us{0}, gpu_user_us{0}, gpu_invol_switches{0},
     gpu_vol_switches{0}, gpu_minor_faults{0};

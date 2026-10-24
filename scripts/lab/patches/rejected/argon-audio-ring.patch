@@ -1,0 +1,17 @@
+diff --git a/runtime/modules/libSceAudioOut/ps4_audioout.c b/runtime/modules/libSceAudioOut/ps4_audioout.c
+index dfb2293..67e240d 100644
+--- a/runtime/modules/libSceAudioOut/ps4_audioout.c
++++ b/runtime/modules/libSceAudioOut/ps4_audioout.c
+@@ -657,9 +657,9 @@ int32_t ps4_audioout_port_open(int32_t user, int32_t type, int32_t index, uint32
+   for (int i = 0; i < 8; i++) port->vol[i] = 1.0f;
+   port->port_gain = (type == PORT_PADSPK) ? g_padspk_gain : 1.0f;
+   if (type == PORT_AUX) port->port_gain = 0.0f;
+-  // Allow one grain playing + one queued, plus slack for the device's
+-  // callback size (typically 512 frames at 48 kHz).
+-  port->ring_limit = 2 * len + 1024;
++  // Allow deeper buffering (8 grains + 4096 frames, ~128 ms at 48 kHz) so
++  // guest frame-time spikes do not underrun the CoreAudio callback mid-cutscene.
++  port->ring_limit = 8 * len + 4096;
+   port->ring_cap = port->ring_limit + len;
+   port->ring = (float *)calloc((size_t)port->ring_cap * 2, sizeof(float));
+ 

@@ -16,8 +16,8 @@
 #include "minimp3.h"
 
 #define MAX_AJM_CONTEXTS 16
-#define MAX_AJM_INSTANCES 128
-#define MAX_AJM_BATCHES 256
+#define MAX_AJM_INSTANCES 16384
+#define MAX_AJM_BATCHES 1024
 #define INSTANCE_ID_MASK 0x3FFF
 
 #define FOURCC(a,b,c,d) ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8) | ((uint32_t)(uint8_t)(c) << 16) | ((uint32_t)(uint8_t)(d) << 24))
@@ -112,6 +112,7 @@ typedef struct {
 
 typedef struct {
     bool in_use;
+    pthread_mutex_t mutex;
     uint32_t id;
     uint32_t context_id;
     OrbisAjmCodecType codec_type;
@@ -143,6 +144,7 @@ typedef struct {
     size_t pcm_buffer_cap;
 } AjmInstance;
 
+#define MAX_AJM_INPUT_BUFS 16
 #define MAX_AJM_OUTPUT_BUFS 16
 
 typedef struct {
@@ -150,6 +152,9 @@ typedef struct {
     uint64_t flags;
     void *input_buf;
     size_t input_size;
+    void *input_bufs[MAX_AJM_INPUT_BUFS];
+    size_t input_sizes[MAX_AJM_INPUT_BUFS];
+    uint32_t num_inputs;
     void *output_bufs[MAX_AJM_OUTPUT_BUFS];
     size_t output_sizes[MAX_AJM_OUTPUT_BUFS];
     uint32_t num_outputs;
@@ -419,25 +424,30 @@ static inline bool ajm_gapless_end(const AjmInstance *inst) {
     return inst->gapless.init.total_samples != 0 && inst->gapless.current.total_samples == 0;
 }
 
-static void ajm_apply_gapless_input(AjmInstance *inst, const OrbisAjmSidebandGaplessDecode *p, bool fresh) {
+static int32_t ajm_apply_gapless_input(AjmInstance *inst, const OrbisAjmSidebandGaplessDecode *p) {
     AjmGapless *g = &inst->gapless;
-    if (fresh) {
-        g->init.total_samples = p->total_samples;
-        g->init.skip_samples = p->skip_samples;
-        g->init.skipped_samples = 0;
-        g->current = g->init;
-        return;
+    int32_t flags_result = 0;
+    uint32_t processed = g->init.total_samples - g->current.total_samples;
+    if (p->total_samples != 0 || p->skip_samples == 0) {
+        if (p->total_samples >= processed) {
+            int64_t diff = (int64_t)g->init.total_samples - p->total_samples;
+            g->init.total_samples = p->total_samples;
+            g->current.total_samples = (uint32_t)(g->current.total_samples - diff);
+        } else {
+            flags_result |= ORBIS_AJM_RESULT_INVALID_PARAM;
+        }
     }
-    if (p->total_samples != 0) {
-        uint32_t mx = p->total_samples > g->init.total_samples ? p->total_samples : g->init.total_samples;
-        g->current.total_samples += mx - g->init.total_samples;
-        g->init.total_samples = mx;
+    uint32_t skipped = (uint32_t)g->init.skip_samples - g->current.skip_samples;
+    if (p->skip_samples != 0 || p->total_samples == 0) {
+        if (p->skip_samples >= skipped) {
+            int32_t diff = (int32_t)g->init.skip_samples - p->skip_samples;
+            g->init.skip_samples = p->skip_samples;
+            g->current.skip_samples = (uint16_t)(g->current.skip_samples - diff);
+        } else {
+            flags_result |= ORBIS_AJM_RESULT_INVALID_PARAM;
+        }
     }
-    if (p->skip_samples != 0) {
-        uint16_t mx = p->skip_samples > g->init.skip_samples ? p->skip_samples : g->init.skip_samples;
-        g->current.skip_samples += mx - g->init.skip_samples;
-        g->init.skip_samples = mx;
-    }
+    return flags_result;
 }
 
 // Decode AT9 frames. Returns AJM result bits.
@@ -447,54 +457,53 @@ static int32_t at9_decode(AjmInstance *inst, AjmParsedJob *job, uint8_t **pin, s
     int32_t result = 0;
     uint32_t frames = 0;
     (void)job;
+    (void)has_mframe;
 
-    if (*prem >= 12 && memcmp(*pin, "RIFF", 4) == 0) {
-        if (at9_parse_riff(inst, pin, prem)) {
+    while (*prem > 0) {
+        if ((inst->flags & AJM_INSTANCE_FLAG_GAPLESS_LOOP) && ajm_gapless_end(inst)) {
+            inst->gapless.current = inst->gapless.init;
+            inst->gapless.current.skipped_samples = 0;
             inst->total_samples = 0;
         }
-    }
-    if (!inst->is_initialized || !inst->at9_handle) {
-        *frames_out = 0;
-        return ORBIS_AJM_RESULT_NOT_INITIALIZED;
-    }
+        if ((inst->codec_flags & AJM_AT9_FLAG_PARSE_RIFF) && *prem >= 12 && memcmp(*pin, "RIFF", 4) == 0) {
+            if (at9_parse_riff(inst, pin, prem)) {
+                inst->total_samples = 0;
+            }
+        }
+        if (!inst->is_initialized || !inst->at9_handle) {
+            result |= ORBIS_AJM_RESULT_NOT_INITIALIZED;
+            break;
+        }
 
-    const uint32_t ch = (uint32_t)inst->at9_info.channels;
-    const uint32_t fs = (uint32_t)inst->at9_info.frameSamples;
-    const size_t ss = ajm_sample_size(inst->format);
-    const int nointerleave = (inst->codec_flags & AJM_AT9_FLAG_NON_INTERLEAVED) ? 1 : 0;
-
-    while (*prem > 0 && ajm_out_remaining(out) > 0 && !ajm_gapless_end(inst)) {
+        const uint32_t ch = (uint32_t)inst->at9_info.channels;
+        const uint32_t fs = (uint32_t)inst->at9_info.frameSamples;
+        const size_t ss = ajm_sample_size(inst->format);
+        const int nointerleave = (inst->codec_flags & AJM_AT9_FLAG_NON_INTERLEAVED) ? 1 : 0;
         AjmGapless *g = &inst->gapless;
-        // AT9 frames inside a superframe are variable length; only the superframe
-        // size is fixed. Never decode from an incomplete superframe: libatrac9 would
-        // zero-fill past the end, produce garbage and desync the stream. Leave the
-        // remainder unconsumed so the game resubmits it with more data.
+
+        if (!ajm_gapless_end(inst)) {
+            uint32_t skip_need = g->current.skip_samples < fs ? g->current.skip_samples : fs;
+            uint32_t need_samples = fs - skip_need;
+            if (g->init.total_samples != 0 && g->current.total_samples < need_samples) {
+                need_samples = g->current.total_samples;
+            }
+            if (ajm_out_remaining(out) < (size_t)need_samples * ch * ss) {
+                result |= ORBIS_AJM_RESULT_NOT_ENOUGH_ROOM;
+            }
+        } else {
+            break;
+        }
         if (*prem < inst->superframe_bytes_remain) {
-            if (frames == 0) result |= ORBIS_AJM_RESULT_PARTIAL_INPUT;
-            break;
+            result |= ORBIS_AJM_RESULT_PARTIAL_INPUT;
         }
-        uint32_t max_samples = g->init.total_samples != 0
-                                   ? (g->current.total_samples < fs ? g->current.total_samples : fs)
-                                   : fs;
-        uint32_t skip_need = g->current.skip_samples < max_samples ? g->current.skip_samples : max_samples;
-        size_t need = (size_t)(max_samples - skip_need) * ch * ss;
-        if (ajm_out_remaining(out) < need) {
-            if (!has_mframe || frames == 0) result |= ORBIS_AJM_RESULT_NOT_ENOUGH_ROOM;
-            break;
-        }
+        if (result) break;
 
         int bytes_used = 0;
-        int ret;
+        short pcm_s16[256 * 8];
         int in_sz = *prem > 0x7FFFFFFF ? 0x7FFFFFFF : (int)*prem;
-        if (inst->format == AJM_FORMAT_S32) {
-            ret = Atrac9DecodeS32(inst->at9_handle, *pin, in_sz, (int *)inst->pcm_buffer, &bytes_used, nointerleave);
-        } else if (inst->format == AJM_FORMAT_FLOAT) {
-            ret = Atrac9DecodeF32(inst->at9_handle, *pin, in_sz, (float *)inst->pcm_buffer, &bytes_used, nointerleave);
-        } else {
-            ret = Atrac9Decode(inst->at9_handle, *pin, in_sz, (short *)inst->pcm_buffer, &bytes_used, nointerleave);
-        }
+        int ret = Atrac9Decode(inst->at9_handle, *pin, in_sz, pcm_s16, &bytes_used, 0);
         if (ret != 0) {
-            result |= ORBIS_AJM_RESULT_CODEC_ERROR | ORBIS_AJM_RESULT_INVALID_DATA;
+            result |= ORBIS_AJM_RESULT_CODEC_ERROR | ORBIS_AJM_RESULT_FATAL;
             *internal_result = ret;
             break;
         }
@@ -507,15 +516,32 @@ static int32_t at9_decode(AjmInstance *inst, AjmParsedJob *job, uint8_t **pin, s
 
         uint32_t skip = g->current.skip_samples < fs ? g->current.skip_samples : fs;
         g->current.skip_samples -= (uint16_t)skip;
-        uint32_t avail = fs - skip;
-        uint32_t n = avail;
-        if (g->init.total_samples != 0 && g->current.total_samples < n) n = g->current.total_samples;
+        uint32_t samples = fs - skip;
+        if (g->init.total_samples != 0 && g->current.total_samples < samples) {
+            samples = g->current.total_samples;
+        }
+        size_t room_samples = ajm_out_remaining(out) / (ch * ss);
+        if (samples > room_samples) samples = (uint32_t)room_samples;
 
-        size_t written = ajm_out_write(out, inst->pcm_buffer + (size_t)skip * ch * ss, (size_t)n * ch * ss);
-        uint32_t wrote_samples = (uint32_t)(written / (ch * ss));
-        g->current.skipped_samples = (uint16_t)(g->current.skipped_samples + (fs - wrote_samples));
-        if (g->init.total_samples != 0) g->current.total_samples -= wrote_samples;
-        inst->total_samples += wrote_samples;
+        for (uint32_t s = 0; s < samples; ++s) {
+            for (uint32_t c = 0; c < ch; ++c) {
+                int16_t v = pcm_s16[(skip + s) * ch + c];
+                size_t index = nointerleave ? ((size_t)c * samples + s) : ((size_t)s * ch + c);
+                if (inst->format == AJM_FORMAT_S16) {
+                    memcpy(inst->pcm_buffer + index * 2, &v, 2);
+                } else if (inst->format == AJM_FORMAT_S32) {
+                    int32_t w = (int32_t)v << 16;
+                    memcpy(inst->pcm_buffer + index * 4, &w, 4);
+                } else {
+                    float f = (float)v / 32768.0f;
+                    memcpy(inst->pcm_buffer + index * 4, &f, 4);
+                }
+            }
+        }
+        ajm_out_write(out, inst->pcm_buffer, (size_t)samples * ch * ss);
+        g->current.skipped_samples = (uint16_t)(g->current.skipped_samples + (fs - samples));
+        if (g->init.total_samples != 0) g->current.total_samples -= samples;
+        inst->total_samples += samples;
         frames++;
 
         inst->at9_num_frames++;
@@ -526,18 +552,27 @@ static int32_t at9_decode(AjmInstance *inst, AjmParsedJob *job, uint8_t **pin, s
             *prem -= pad;
             inst->superframe_bytes_remain = (uint32_t)inst->at9_info.superframeSize;
             inst->at9_num_frames = 0;
+        } else if (ajm_gapless_end(inst)) {
+            while (inst->at9_num_frames % (uint32_t)inst->at9_info.framesInSuperframe != 0 && *prem > 0) {
+                int drain_sz = *prem > 0x7FFFFFFF ? 0x7FFFFFFF : (int)*prem;
+                if (Atrac9Decode(inst->at9_handle, *pin, drain_sz, pcm_s16, &bytes_used, 0) != 0) break;
+                if (bytes_used < 0) bytes_used = 0;
+                if ((size_t)bytes_used > *prem) bytes_used = (int)*prem;
+                *pin += bytes_used;
+                *prem -= (size_t)bytes_used;
+                inst->superframe_bytes_remain = (uint32_t)bytes_used >= inst->superframe_bytes_remain
+                                                    ? 0 : inst->superframe_bytes_remain - (uint32_t)bytes_used;
+                inst->at9_num_frames++;
+            }
+            size_t pad = inst->superframe_bytes_remain;
+            if (pad > *prem) pad = *prem;
+            *pin += pad;
+            *prem -= pad;
+            inst->superframe_bytes_remain = (uint32_t)inst->at9_info.superframeSize;
+            inst->at9_num_frames = 0;
         }
 
         if (!(run_flags & AJM_RUN_MULTIPLE_FRAMES)) break;
-    }
-
-    if ((inst->flags & AJM_INSTANCE_FLAG_GAPLESS_LOOP) && ajm_gapless_end(inst)) {
-        *pin += *prem;
-        *prem = 0;
-        inst->gapless.current = inst->gapless.init;
-        uint8_t cfg[4];
-        memcpy(cfg, inst->at9_config, 4);
-        at9_init(inst, cfg);
     }
 
     *frames_out = frames;
@@ -633,9 +668,11 @@ static void process_single_job(AjmParsedJob *job) {
         }
         if (sideband_flags & AJM_SIDEBAND_FORMAT) SB_TAKE(OrbisAjmSidebandFormat, p_format);
         if (sideband_flags & AJM_SIDEBAND_GAPLESS) SB_TAKE(OrbisAjmSidebandGaplessDecode, p_gapless);
-        if (run_flags & AJM_RUN_MULTIPLE_FRAMES) {
-            SB_TAKE(OrbisAjmSidebandMFrame, p_mframe);
-            if (p_mframe) memset(p_mframe, 0, sizeof(*p_mframe));
+        if ((run_flags & AJM_RUN_MULTIPLE_FRAMES) &&
+            sb_cur + sizeof(OrbisAjmSidebandMFrame) <= sb_end) {
+            p_mframe = (OrbisAjmSidebandMFrame *)sb_cur;
+            sb_cur += sizeof(OrbisAjmSidebandMFrame);
+            memset(p_mframe, 0, sizeof(*p_mframe));
         }
         if (run_flags & AJM_RUN_GET_CODEC_INFO) {
             p_codec_info = sb_cur;
@@ -655,6 +692,8 @@ static void process_single_job(AjmParsedJob *job) {
         if (p_result) p_result->result = ORBIS_AJM_RESULT_INVALID_PARAM | ORBIS_AJM_RESULT_FATAL;
         return;
     }
+    pthread_mutex_lock(&inst->mutex);
+    pthread_mutex_unlock(&g_ajm_lock);
 
     int32_t result_code = 0;
     int32_t internal_result = 0;
@@ -666,10 +705,24 @@ static void process_single_job(AjmParsedJob *job) {
     if (control_flags & AJM_CONTROL_RESET) {
         ajm_instance_reset(inst);
     }
-    // Input control sideband: [init params], [format], [gapless]
+    // Input control sideband order: [format (24)], [gapless (8)], [resample (8)], [init params (8)]
     {
         uint8_t *in_cur = (uint8_t *)job->control_in_buf;
         uint8_t *in_end = in_cur ? in_cur + job->control_in_size : NULL;
+        if (in_cur && (sideband_flags & AJM_SIDEBAND_FORMAT) &&
+            in_cur + sizeof(OrbisAjmSidebandFormat) <= in_end) {
+            in_cur += sizeof(OrbisAjmSidebandFormat);
+        }
+        if (in_cur && (sideband_flags & AJM_SIDEBAND_GAPLESS) &&
+            in_cur + sizeof(OrbisAjmSidebandGaplessDecode) <= in_end) {
+            OrbisAjmSidebandGaplessDecode gp;
+            memcpy(&gp, in_cur, sizeof(gp));
+            result_code |= ajm_apply_gapless_input(inst, &gp);
+            in_cur += sizeof(gp);
+        }
+        if (in_cur && (control_flags & AJM_CONTROL_RESAMPLE) && in_cur + 8 <= in_end) {
+            in_cur += 8;
+        }
         if (in_cur && (control_flags & AJM_CONTROL_INITIALIZE)) {
             size_t rem = (size_t)(in_end - in_cur);
             if (inst->codec_type == AJM_CODEC_AT9_DEC) {
@@ -685,36 +738,40 @@ static void process_single_job(AjmParsedJob *job) {
                 inst->mp3_inited = true;
                 inst->is_initialized = true;
             }
-            // AjmDecAt9InitializeParameters / generic init params are 8 bytes
             in_cur += rem < 8 ? rem : 8;
-        }
-        if (in_cur && (sideband_flags & AJM_SIDEBAND_FORMAT) &&
-            in_cur + sizeof(OrbisAjmSidebandFormat) <= in_end) {
-            in_cur += sizeof(OrbisAjmSidebandFormat); // output format request: not modelled
-        }
-        if (in_cur && (sideband_flags & AJM_SIDEBAND_GAPLESS) &&
-            in_cur + sizeof(OrbisAjmSidebandGaplessDecode) <= in_end) {
-            OrbisAjmSidebandGaplessDecode gp;
-            memcpy(&gp, in_cur, sizeof(gp));
-            ajm_apply_gapless_input(inst, &gp, (control_flags & AJM_CONTROL_RESET) != 0);
-            in_cur += sizeof(gp);
         }
     }
 
-    // Run data
-    if (job->input_buf && job->input_size > 0 && job->num_outputs > 0) {
-        uint8_t *in_data = (uint8_t *)job->input_buf;
-        size_t in_rem = job->input_size;
+    // Run data (supports single and split input buffers)
+    if (job->input_size > 0 && job->num_outputs > 0) {
+        uint8_t *joined = NULL;
+        uint8_t *in_data = NULL;
+        if (job->num_inputs <= 1) {
+            in_data = (uint8_t *)job->input_buf;
+        } else {
+            joined = (uint8_t *)malloc(job->input_size);
+            if (joined) {
+                size_t at = 0;
+                for (uint32_t i = 0; i < job->num_inputs; i++) {
+                    memcpy(joined + at, job->input_bufs[i], job->input_sizes[i]);
+                    at += job->input_sizes[i];
+                }
+                in_data = joined;
+            }
+        }
+        size_t in_rem = in_data ? job->input_size : 0;
         AjmOut out = { .job = job, .idx = 0, .off = 0 };
         size_t out_total = ajm_out_remaining(&out);
         uint32_t frames = 0;
 
-        if (inst->codec_type == AJM_CODEC_AT9_DEC) {
-            result_code |= at9_decode(inst, job, &in_data, &in_rem, &out, run_flags, p_mframe != NULL,
+        const bool is_multi_frame = (run_flags & AJM_RUN_MULTIPLE_FRAMES) != 0;
+        if (in_data && inst->codec_type == AJM_CODEC_AT9_DEC) {
+            result_code |= at9_decode(inst, job, &in_data, &in_rem, &out, run_flags, is_multi_frame,
                                       &frames, &internal_result);
-        } else if (inst->codec_type == AJM_CODEC_MP3_DEC) {
-            result_code |= mp3_decode(inst, &in_data, &in_rem, &out, run_flags, p_mframe != NULL, &frames);
+        } else if (in_data && inst->codec_type == AJM_CODEC_MP3_DEC) {
+            result_code |= mp3_decode(inst, &in_data, &in_rem, &out, run_flags, is_multi_frame, &frames);
         }
+        free(joined);
 
         decoded_input_bytes = job->input_size - in_rem;
         decoded_output_bytes = out_total - ajm_out_remaining(&out);
@@ -788,7 +845,7 @@ static void process_single_job(AjmParsedJob *job) {
             }
         }
     }
-    pthread_mutex_unlock(&g_ajm_lock);
+    pthread_mutex_unlock(&inst->mutex);
 
     if (truncated) {
         // shadPS4 never reports SIDEBAND_TRUNC; we only write the sections that fit.
@@ -1011,6 +1068,7 @@ void shim_sceAjmInstanceCreate(GuestContext *ctx) {
 
     AjmInstance *inst = &g_ajm_instances[slot];
     memset(inst, 0, sizeof(*inst));
+    pthread_mutex_init(&inst->mutex, NULL);
     inst->in_use = true;
     inst->id = (uint32_t)slot;
     inst->context_id = context_id;
@@ -1046,6 +1104,9 @@ void shim_sceAjmInstanceDestroy(GuestContext *ctx) {
         ctx->rax = ORBIS_AJM_ERROR_INVALID_INSTANCE;
         SHIM_RETURN();
     }
+    inst->in_use = false;
+    pthread_mutex_lock(&inst->mutex);
+    pthread_mutex_unlock(&g_ajm_lock);
 
     if (inst->at9_handle) {
         Atrac9ReleaseHandle(inst->at9_handle);
@@ -1055,8 +1116,8 @@ void shim_sceAjmInstanceDestroy(GuestContext *ctx) {
         free(inst->pcm_buffer);
         inst->pcm_buffer = NULL;
     }
-    inst->in_use = false;
-    pthread_mutex_unlock(&g_ajm_lock);
+    pthread_mutex_unlock(&inst->mutex);
+    pthread_mutex_destroy(&inst->mutex);
 
     ctx->rax = 0;
     SHIM_RETURN();
@@ -1124,9 +1185,10 @@ void shim_sceAjmBatchJobControlBufferRa(GuestContext *ctx) {
         cur += sizeof(AjmChunkBuffer);
     }
     {
+        uint64_t masked_flags = flags & (instance_id == AJM_INSTANCE_STATISTICS ? 0xC0018007ULL : 0x60000000E7FFULL);
         AjmChunkFlags *fl = (AjmChunkFlags *)cur;
-        fl->header = make_chunk_header(AjmIdentControlFlags, (uint32_t)(flags >> 32));
-        fl->flags_low = (uint32_t)flags;
+        fl->header = make_chunk_header(AjmIdentControlFlags, (uint32_t)(masked_flags >> 32));
+        fl->flags_low = (uint32_t)masked_flags;
         cur += sizeof(AjmChunkFlags);
     }
     {
@@ -1180,9 +1242,10 @@ void shim_sceAjmBatchJobRunBufferRa(GuestContext *ctx) {
         cur += sizeof(AjmChunkBuffer);
     }
     {
+        uint64_t masked_flags = flags & 0xE00000001FFFULL;
         AjmChunkFlags *fl = (AjmChunkFlags *)cur;
-        fl->header = make_chunk_header(AjmIdentRunFlags, (uint32_t)(flags >> 32));
-        fl->flags_low = (uint32_t)flags;
+        fl->header = make_chunk_header(AjmIdentRunFlags, (uint32_t)(masked_flags >> 32));
+        fl->flags_low = (uint32_t)masked_flags;
         cur += sizeof(AjmChunkFlags);
     }
     {
@@ -1279,9 +1342,10 @@ void shim_sceAjmBatchJobRunSplitBufferRa(GuestContext *ctx) {
         cur += sizeof(AjmChunkBuffer);
     }
     {
+        uint64_t masked_flags = flags & 0xE00000001FFFULL;
         AjmChunkFlags *fl = (AjmChunkFlags *)cur;
-        fl->header = make_chunk_header(AjmIdentRunFlags, (uint32_t)(flags >> 32));
-        fl->flags_low = (uint32_t)flags;
+        fl->header = make_chunk_header(AjmIdentRunFlags, (uint32_t)(masked_flags >> 32));
+        fl->flags_low = (uint32_t)masked_flags;
         cur += sizeof(AjmChunkFlags);
     }
     const uint64_t *out_arr = (const uint64_t *)guest_to_host(ctx, out_bufs_gaddr);
@@ -1391,9 +1455,14 @@ void shim_sceAjmBatchStartBuffer(GuestContext *ctx) {
                 uint8_t sub_ident = chunk_ident(*h);
                 if (sub_ident == AjmIdentInputRunBuf) {
                     AjmChunkBuffer *buf = (AjmChunkBuffer *)stream_consume(&sub, sizeof(AjmChunkBuffer));
-                    if (buf && buf->p_address && buf->size > 0 && !pj->input_buf) {
-                        pj->input_buf = buf->p_address;
-                        pj->input_size = buf->size;
+                    if (buf && buf->p_address && buf->size > 0 && pj->num_inputs < MAX_AJM_INPUT_BUFS) {
+                        if (pj->num_inputs == 0) {
+                            pj->input_buf = buf->p_address;
+                        }
+                        pj->input_bufs[pj->num_inputs] = buf->p_address;
+                        pj->input_sizes[pj->num_inputs] = buf->size;
+                        pj->input_size += buf->size;
+                        pj->num_inputs++;
                     }
                 } else if (sub_ident == AjmIdentOutputRunBuf) {
                     AjmChunkBuffer *buf = (AjmChunkBuffer *)stream_consume(&sub, sizeof(AjmChunkBuffer));
@@ -1410,7 +1479,7 @@ void shim_sceAjmBatchStartBuffer(GuestContext *ctx) {
                     if (buf) { pj->control_out_buf = buf->p_address; pj->control_out_size = buf->size; }
                 } else if (sub_ident == AjmIdentControlFlags || sub_ident == AjmIdentRunFlags) {
                     AjmChunkFlags *fl = (AjmChunkFlags *)stream_consume(&sub, sizeof(AjmChunkFlags));
-                    if (fl) { pj->flags = ((uint64_t)chunk_payload(fl->header) << 32) | fl->flags_low; }
+                    if (fl) { pj->flags |= ((uint64_t)chunk_payload(fl->header) << 32) | fl->flags_low; }
                 } else if (sub_ident == AjmIdentReturnAddressBuf) {
                     AjmChunkBuffer *buf = (AjmChunkBuffer *)stream_consume(&sub, sizeof(AjmChunkBuffer));
                     if (buf) { pj->return_addr = buf->p_address; }

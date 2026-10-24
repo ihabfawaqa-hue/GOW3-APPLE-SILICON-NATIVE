@@ -739,7 +739,7 @@ void ps4_gnm_notify_eop(void) {
     pthread_mutex_lock(&s_gnm_eq_mutex);
     for (int i = 0; i < 16; i++) {
         if (s_gnm_eq_events[i].active) {
-            ps4_equeue_post_event(s_gnm_eq_events[i].eq, s_gnm_eq_events[i].id, ORBIS_KERNEL_EVFILT_GRAPHICS_CORE, 0, s_gnm_eq_events[i].udata);
+            ps4_equeue_trigger_event(s_gnm_eq_events[i].eq, s_gnm_eq_events[i].id, ORBIS_KERNEL_EVFILT_GRAPHICS_CORE, 0, s_gnm_eq_events[i].udata);
         }
     }
     pthread_mutex_unlock(&s_gnm_eq_mutex);

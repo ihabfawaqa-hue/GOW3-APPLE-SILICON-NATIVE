@@ -129,7 +129,7 @@ static void *vblank_thread_func(void *arg) {
 
             for (int q = 0; q < vh->vblankQueueCount; q++) {
                 if (vh->vblankQueues[q] > 0) {
-                    ps4_equeue_post_event(vh->vblankQueues[q], 0x7 /* Vblank */, ORBIS_KERNEL_EVFILT_VIDEO_OUT, (int64_t)vblank_event_data, vh->vblankUdatas[q]);
+                    ps4_equeue_trigger_event(vh->vblankQueues[q], 0x7 /* Vblank */, ORBIS_KERNEL_EVFILT_VIDEO_OUT, (int64_t)vblank_event_data, vh->vblankUdatas[q]);
                 }
             }
             pthread_mutex_unlock(&vh->mutex);
@@ -410,8 +410,8 @@ static void finish_flip(const PendingFlip *pf) {
         uint64_t event_data = time_12b | (counter_4b << 12) | ((uint64_t)pf->flipArg << 16);
         for (int q = 0; q < vh->flipQueueCount; q++) {
             if (vh->flipQueues[q] > 0) {
-                ps4_equeue_post_event(vh->flipQueues[q], 0x6 /* Flip */, ORBIS_KERNEL_EVFILT_VIDEO_OUT,
-                                      (int64_t)event_data, vh->flipQueueUdatas[q]);
+                ps4_equeue_trigger_event(vh->flipQueues[q], 0x6 /* Flip */, ORBIS_KERNEL_EVFILT_VIDEO_OUT,
+                                         (int64_t)event_data, vh->flipQueueUdatas[q]);
             }
         }
         pthread_mutex_unlock(&vh->mutex);

@@ -341,7 +341,7 @@ void VideoOutDriver::Flip(const Request& req) {
         FILE* file = std::fopen(path, "w");
         if (file) {
             std::setvbuf(file, nullptr, _IOLBF, 0);
-            std::fprintf(file, "flip,time_ns,flip_arg,draws,dispatches,submissions,compiles,backing_swaps,swap_pixels,clear_candidates,clear_skips,reduced_draws,scene_draws,regmem_wait_ns,regmem_waits,submit_lock_ns\n");
+            std::fprintf(file, "flip,time_ns,flip_arg,draws,dispatches,submissions,compiles,backing_swaps,swap_pixels,clear_candidates,clear_skips,reduced_draws,scene_draws,regmem_wait_ns,regmem_waits,submit_lock_ns,invisible_draws\n");
         }
         return file;
     }();
@@ -349,7 +349,7 @@ void VideoOutDriver::Flip(const Request& req) {
         static unsigned long long sequence = 0;
         const auto time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        std::fprintf(benchmark, "%llu,%lld,%lld,%llu,%llu,%llu,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n", ++sequence,
+        std::fprintf(benchmark, "%llu,%lld,%lld,%llu,%llu,%llu,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n", ++sequence,
                      static_cast<long long>(time_ns), static_cast<long long>(req.flip_arg),
                      static_cast<unsigned long long>(Gow3Stats::draws.load()),
                      static_cast<unsigned long long>(Gow3Stats::dispatches.load()),
@@ -363,7 +363,8 @@ void VideoOutDriver::Flip(const Request& req) {
                      static_cast<unsigned long long>(Gow3Stats::scene_draws.load()),
                      static_cast<unsigned long long>(Gow3Stats::regmem_wait_ns.load()),
                      static_cast<unsigned long long>(Gow3Stats::regmem_waits.load()),
-                     static_cast<unsigned long long>(Gow3Stats::submit_lock_ns.load()));
+                     static_cast<unsigned long long>(Gow3Stats::submit_lock_ns.load()),
+                     static_cast<unsigned long long>(Gow3Stats::invisible_draws.load()));
     }
 
     // gow3: GOW3_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.

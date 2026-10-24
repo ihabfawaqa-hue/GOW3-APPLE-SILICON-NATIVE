@@ -213,7 +213,8 @@ private:
     bool FilterDraw();
     bool FilterDrawPasses() const;
     /// Everything of a direct draw after the pipeline selection (GPU thread or stage B).
-    void DiagnosticPassSubmit();
+    void DiagnosticPassSubmit(const GraphicsPipeline* pipeline);
+    bool IsInvisibleDraw(const GraphicsPipeline& pipeline);
     void DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                     bool is_indexed, u32 index_offset);
     static bool DrawPipeWanted();
@@ -346,7 +347,7 @@ private:
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
-    std::array<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1> diagnostic_pass_targets{};
+    std::array<u64, AmdGpu::NUM_COLOR_BUFFERS + 2> diagnostic_pass_targets{};
     VAddr last_display_address{}; ///< display buffer of the previous draw (0: not one)
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;

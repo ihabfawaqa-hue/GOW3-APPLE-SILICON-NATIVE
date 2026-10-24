@@ -1,0 +1,47 @@
+diff --git a/third_party/gow3gpu/gpu/shim/gow3_settings.h b/third_party/gow3gpu/gpu/shim/gow3_settings.h
+index 872258a..b307f33 100644
+--- a/third_party/gow3gpu/gpu/shim/gow3_settings.h
++++ b/third_party/gow3gpu/gpu/shim/gow3_settings.h
+@@ -28,13 +28,13 @@ inline constexpr int OutputCount = 4;
+ inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
+ 
+ struct Values {
+-    std::atomic<int> upscaler{UpscalerFsr3};
++    std::atomic<int> upscaler{UpscalerOff};
+     std::atomic<int> preset{NativeAA};
+-    std::atomic<bool> sharpen{true};
++    std::atomic<bool> sharpen{false};
+     std::atomic<float> sharpness{0.3f};
+-    std::atomic<bool> jitter{true};
++    std::atomic<bool> jitter{false};
+     std::atomic<bool> reactive{false};
+-    std::atomic<bool> object_motion{true};
++    std::atomic<bool> object_motion{false};
+     std::atomic<float> reactive_scale{1.0f};
+     std::atomic<float> reactive_threshold{0.2f};
+     std::atomic<float> reactive_max{0.9f};
+@@ -60,11 +60,11 @@ struct Values {
+     std::atomic<bool> actor_watch_supported{false};
+     // Graphics (gow3_graphics.h). Live: applied on the next frame.
+     std::atomic<int> display_mode{0};
+-    std::atomic<bool> vsync{true};
++    std::atomic<bool> vsync{false};
+     std::atomic<int> fps_limit{0};
+     std::atomic<bool> async_shaders{true};
+     std::atomic<bool> fsr1{false};
+-    std::atomic<bool> rcas{true};
++    std::atomic<bool> rcas{false};
+     std::atomic<int> rcas_strength{75};
+     /// Set by the presenter: sharpening ran on the last frame (it needs FSR 1 when the game's
+     /// image is smaller than the window).
+@@ -102,8 +102,8 @@ struct Values {
+ 
+     /// Startup settings for the explicit GOW3_RENDER_RES compatibility patch only.
+     int startup_preset = NativeAA;
+-    int startup_upscaler = UpscalerFsr3;
+-    bool startup_object_motion = true;
++    int startup_upscaler = UpscalerOff;
++    bool startup_object_motion = false;
+     int startup_output_res = OutputDefault;
+     int startup_live_resolution = 0;
+ };

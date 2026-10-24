@@ -1,0 +1,27 @@
+diff --git a/Launch_GOW3_Vulkan.command b/Launch_GOW3_Vulkan.command
+index ea749fc..9e81205 100755
+--- a/Launch_GOW3_Vulkan.command
++++ b/Launch_GOW3_Vulkan.command
+@@ -20,12 +20,21 @@ fi
+ LAB_DIR="$HOME/Library/Application Support/GOW3Lab"
+ # Versioned GPU library and KosmicKrisp driver (scripts/lab/install_runtime.sh); repoint
+ # runtime/current at an older version, or set these variables, to roll back.
+-RUNTIME_DIR="$LAB_DIR/runtime/current"
++if [ -f "$DIR/build/runtime/libgow3gpu.dylib" ] && [ -f "$DIR/build/runtime/kosmickrisp_icd.json" ]; then
++    RUNTIME_DIR="$DIR/build/runtime"
++else
++    RUNTIME_DIR="$LAB_DIR/runtime/current"
++fi
+ export PS4_GOW3GPU_BACKEND=gow3gpu-vulkan
+ export PS4_GOW3GPU_LIBRARY="${PS4_GOW3GPU_LIBRARY:-$RUNTIME_DIR/libgow3gpu.dylib}"
+ export VK_DRIVER_FILES="${VK_DRIVER_FILES:-$RUNTIME_DIR/kosmickrisp_icd.json}"
+ export PS4_GOW3GPU_USER_DIR="${PS4_GOW3GPU_USER_DIR:-$LAB_DIR/candidate-user}"
+ export GOW3_GPU_USER_DIR="${GOW3_GPU_USER_DIR:-$PS4_GOW3GPU_USER_DIR}"
++export GOW3_DEFERRED_READBACK="${GOW3_DEFERRED_READBACK:-1}"
++export GOW3_STALE_READBACK="${GOW3_STALE_READBACK:-1}"
++export GOW3_UPSCALER="${GOW3_UPSCALER:-off}"
++export GOW3_OBJECT_MOTION="${GOW3_OBJECT_MOTION:-0}"
++export GOW3_RCAS="${GOW3_RCAS:-0}"
+ 
+ echo "=========================================================="
+ echo "  God of War III Remastered - Native Apple Silicon ARM64  "

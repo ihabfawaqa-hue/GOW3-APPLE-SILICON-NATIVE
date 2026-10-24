@@ -735,6 +735,8 @@ public:
     void SetPassLabel(std::string label) {
         pass_label = std::move(label);
     }
+    /// gow3: names the current command buffer now (diagnostic commits without a render pass).
+    void LabelCommandBuffer(std::string label);
     static bool PassLabelsEnabled() {
         static const bool enabled = std::getenv("GOW3_METAL_PASS_LABELS") != nullptr;
         return enabled;

@@ -375,6 +375,11 @@ void TemporalUpscaler::OnDispatch(u64 cs_hash) {
         reset = true;
         return;
     }
+    // gow3: a camera cut (cutscenes, scripted events) restarts the history; blending frames
+    // from the old camera left trailing copies of moving things (the gate attack).
+    if (camera_motion.Cut() && !Gow3Toggle::Disabled(Gow3Toggle::CameraCutReset)) {
+        reset = true;
+    }
     Run();
 }
 

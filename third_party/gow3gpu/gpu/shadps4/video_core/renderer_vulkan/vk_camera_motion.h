@@ -46,6 +46,11 @@ public:
         return debug_overlay || for_upscaler;
     }
 
+    /// The current camera does not continue the previous one (a cut or a jump): history
+    /// accumulated along the old camera must be dropped. Updates the running average camera
+    /// travel per frame; call once per frame.
+    [[nodiscard]] bool Cut() noexcept;
+
     /// Both cameras and the scene depth of the current frame are known.
     [[nodiscard]] bool Ready() const noexcept {
         return current.valid && previous.valid && depth_id;
@@ -101,6 +106,7 @@ private:
 
     ObjectMotion* object_motion = nullptr;
     Camera current, previous;
+    float average_travel = 0.0f; ///< running average camera travel per frame (Cut)
     bool frame_has_camera = false;
     std::array<float, 2> jitter{}, previous_jitter{};
     std::array<u32, 2> render_size{};

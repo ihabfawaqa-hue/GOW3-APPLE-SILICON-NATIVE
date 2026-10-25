@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -151,6 +152,40 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
 }
 
 CameraMotion::~CameraMotion() = default;
+
+bool CameraMotion::Cut() noexcept {
+    if (!current.valid || !previous.valid) {
+        return false;
+    }
+    // Viewing direction: the view matrix's third row; position: the inverse view's translation.
+    const auto& a = current.view;
+    const auto& b = previous.view;
+    const float dot = a[8] * b[8] + a[9] * b[9] + a[10] * b[10];
+    const float len = std::sqrt((a[8] * a[8] + a[9] * a[9] + a[10] * a[10]) *
+                                (b[8] * b[8] + b[9] * b[9] + b[10] * b[10]));
+    const float cos_angle = len > 0.0f ? dot / len : 1.0f;
+    const float fov_ratio = previous.proj[1] != 0.0f ? current.proj[1] / previous.proj[1] : 1.0f;
+    const float dx = current.inv_view[3] - previous.inv_view[3];
+    const float dy = current.inv_view[7] - previous.inv_view[7];
+    const float dz = current.inv_view[11] - previous.inv_view[11];
+    const float travel = std::sqrt(dx * dx + dy * dy + dz * dz);
+    // A cut: turning more than 25 degrees, the field of view changing by more than 10%, or a
+    // jump far beyond the recent camera speed (game units are unknown, hence relative).
+    const bool cut = cos_angle < 0.906f || fov_ratio < 0.9f || fov_ratio > 1.1f ||
+                     (travel > 12.0f * average_travel && travel > 1.0f);
+    if (!cut) {
+        average_travel = average_travel * 0.9f + travel * 0.1f;
+    } else {
+        static u32 logged = 0;
+        if (logged < 20) {
+            ++logged;
+            std::printf("Camera cut: turned %.1f deg, fov x%.2f, moved %.2f (average %.3f)\n",
+                        std::acos(std::clamp(cos_angle, -1.0f, 1.0f)) * 57.2958f, fov_ratio,
+                        travel, average_travel);
+        }
+    }
+    return cut;
+}
 
 float CameraMotion::VerticalFov() const noexcept {
     return 2.0f * std::atan(1.0f / current.proj[1]);

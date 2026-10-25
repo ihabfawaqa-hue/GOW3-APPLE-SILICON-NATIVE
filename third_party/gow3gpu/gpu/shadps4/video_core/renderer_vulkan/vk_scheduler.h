@@ -775,6 +775,9 @@ public:
             direct_recordings.fetch_add(1, std::memory_order_relaxed);
             TraceDirectRecording(__builtin_return_address(0));
         }
+        if (RecordingCheckEnabled()) [[unlikely]] {
+            NoteRawCommandBuffer();
+        }
         return current_cmdbuf;
     }
 
@@ -783,11 +786,31 @@ public:
 
     /// Records `func(vk::CommandBuffer)` in order with other commands. The closure must own
     /// everything it uses (capture by value): it may run later on the recording thread.
+    /// gow3: GOW3_RECORDING_CHECK=1 reports two threads recording into the current command
+    /// buffer at once (direct Record() calls, the recording thread's chunks, submission) and
+    /// any use of the scheduler by one thread while another holds the raw command buffer
+    /// (from CommandBuffer() until its KickRecording() or submission).
+    static bool RecordingCheckEnabled();
+    bool RecordingEnter(const char* where);
+    void RecordingExit(bool owned);
+    void NoteRawCommandBuffer();
+    void CheckRawOwner(const char* where);
+    void ReleaseRawCommandBuffer(const char* where);
+
     template <typename Func>
     void Record(Func&& func) {
         if (!recording_threaded || direct_mode) {
+            if (RecordingCheckEnabled()) [[unlikely]] {
+                const bool owned = RecordingEnter("direct Record");
+                func(current_cmdbuf);
+                RecordingExit(owned);
+                return;
+            }
             func(current_cmdbuf);
             return;
+        }
+        if (RecordingCheckEnabled()) [[unlikely]] {
+            CheckRawOwner("deferred Record");
         }
         if (Gow3Toggle::Disabled(Gow3Toggle::ThreadedRecording)) {
             SyncRecording();
@@ -947,6 +970,10 @@ private:
 private:
     const Instance& instance;
     std::string pass_label;
+    // GOW3_RECORDING_CHECK state (RecordingEnter).
+    std::atomic<u64> check_owner{0};
+    std::atomic<const char*> check_where{nullptr};
+    std::atomic<u64> check_raw_owner{0};
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;

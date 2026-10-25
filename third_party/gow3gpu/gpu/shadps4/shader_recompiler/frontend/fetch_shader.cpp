@@ -130,6 +130,36 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
         return std::nullopt;
     }
 
+    // gow3: the pipeline cache parses the fetch shader on every draw. Results are cached
+    // per thread by code address and revalidated against a copy of the code, which is
+    // much cheaper than decoding it again. The lookup comes first and copies only the
+    // cached code (a few dozen words): copying the whole 16 KB window for every draw
+    // first took ~7% of the GPU command thread.
+    struct CachedParse {
+        std::vector<u32> code;
+        FetchShaderData data;
+    };
+    thread_local std::unordered_map<VAddr, CachedParse> cache;
+    thread_local std::vector<u32> scratch;
+    const bool use_cache = !Gow3Toggle::Disabled(Gow3Toggle::FetchShaderCache);
+    if (const auto user_data = info.UserData();
+        use_cache && info.fetch_shader_sgpr_base <= user_data.size() &&
+        user_data.size() - info.fetch_shader_sgpr_base >= 2) {
+        VAddr address{};
+        std::memcpy(&address, user_data.data() + info.fetch_shader_sgpr_base, sizeof(address));
+        address &= 0xFFFFFFFFFFFFULL;
+        if (const auto it = cache.find(address); it != cache.end()) {
+            auto* memory = Core::Memory::Instance();
+            const u64 bytes = it->second.code.size() * sizeof(u32);
+            scratch.resize(it->second.code.size());
+            if (memory->ClampRangeSize(address, bytes) == bytes &&
+                memory->CopySparseMemory(address, reinterpret_cast<u8*>(scratch.data()), bytes) &&
+                std::memcmp(scratch.data(), it->second.code.data(), bytes) == 0) {
+                return it->second.data;
+            }
+        }
+    }
+
     std::vector<u32> code_storage;
     VAddr code_address{};
     size_t code_bytes{};
@@ -141,16 +171,8 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
     }
     const auto* code = code_storage.data();
 
-    // gow3: the pipeline cache parses the fetch shader on every draw. Results are cached
-    // per thread by code address and revalidated against a copy of the code, which is
-    // much cheaper than decoding it again.
-    struct CachedParse {
-        std::vector<u32> code;
-        FetchShaderData data;
-    };
-    thread_local std::unordered_map<VAddr, CachedParse> cache;
     if (const auto it = cache.find(code_address);
-        !Gow3Toggle::Disabled(Gow3Toggle::FetchShaderCache) && it != cache.end() &&
+        use_cache && it != cache.end() &&
         it->second.code.size() <= code_storage.size() &&
         std::memcmp(code, it->second.code.data(), it->second.code.size() * sizeof(u32)) == 0) {
         return it->second.data;

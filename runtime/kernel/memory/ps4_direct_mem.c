@@ -45,6 +45,48 @@ __attribute__((weak)) void ps4_gnm_guest_remapped(uint64_t addr, uint64_t size) 
     (void)addr; (void)size;
 }
 
+// The remap notification runs the renderer's invalidation, which takes its cache locks.
+// The renderer holds those while it changes page protection or reads guest memory, both of
+// which take g_direct_mutex: notifying under g_direct_mutex deadlocked (a write fault on
+// the guest main thread against a FIOS thread mapping direct memory). Ranges remapped
+// under the lock are queued per thread and notified once it is released.
+#define DM_PENDING_REMAPS 16
+static _Thread_local struct {
+    uint64_t addr, size;
+} g_pending_remaps[DM_PENDING_REMAPS];
+static _Thread_local unsigned g_pending_remap_count;
+
+static void dm_note_remap(uint64_t addr, uint64_t size) {
+    if (!size) return;
+    if (g_pending_remap_count == DM_PENDING_REMAPS) {
+        // Full: widen the last entry over this range (invalidating more is harmless).
+        uint64_t *last_addr = &g_pending_remaps[DM_PENDING_REMAPS - 1].addr;
+        uint64_t *last_size = &g_pending_remaps[DM_PENDING_REMAPS - 1].size;
+        const uint64_t start = *last_addr < addr ? *last_addr : addr;
+        const uint64_t end = *last_addr + *last_size > addr + size ? *last_addr + *last_size
+                                                                   : addr + size;
+        *last_addr = start;
+        *last_size = end - start;
+        return;
+    }
+    g_pending_remaps[g_pending_remap_count].addr = addr;
+    g_pending_remaps[g_pending_remap_count].size = size;
+    g_pending_remap_count++;
+}
+
+static void dm_lock(void) {
+    pthread_mutex_lock(&g_direct_mutex);
+}
+
+static void dm_unlock(void) {
+    pthread_mutex_unlock(&g_direct_mutex);
+    while (g_pending_remap_count) {
+        const unsigned index = --g_pending_remap_count;
+        if (ps4_gnm_guest_remapped)
+            ps4_gnm_guest_remapped(g_pending_remaps[index].addr, g_pending_remaps[index].size);
+    }
+}
+
 static void dm_phys_init(void) {
     if (g_phys_base || getenv("PS4_NO_PHYS_ALIAS")) return;
     size_t sz = 128ULL << 30; // virtual only; pages are committed on first touch
@@ -84,7 +126,7 @@ static int dm_alias(GuestContext *ctx, uint64_t vaddr, uint64_t phys, size_t len
         m->next = g_dmaps;
         g_dmaps = m;
     }
-    if (ps4_gnm_guest_remapped) ps4_gnm_guest_remapped(vaddr, len);
+    dm_note_remap(vaddr, len);
     return 0;
 #else
     (void)ctx; (void)vaddr; (void)phys; (void)len;
@@ -95,11 +137,11 @@ static int dm_alias(GuestContext *ctx, uint64_t vaddr, uint64_t phys, size_t len
 // Called by recomp_vm_free (without vm_mutex held): detach guest [addr, addr+size) from
 // physical memory so the virtual range no longer aliases it.
 void ps4_direct_mem_guest_access_lock(void) {
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
 }
 
 void ps4_direct_mem_guest_access_unlock(void) {
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
 }
 
 void ps4_direct_mem_on_unmap_locked(GuestContext *ctx, uint64_t addr, size_t size) {
@@ -116,7 +158,7 @@ void ps4_direct_mem_on_unmap_locked(GuestContext *ctx, uint64_t addr, size_t siz
         // Replace the overlap with fresh private zero pages.
         PS4_HITCH_TIMED(PS4_HITCH_VM, mmap(proc->mem_base + ostart, oend - ostart, PROT_READ | PROT_WRITE,
                                            MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0));
-        if (ps4_gnm_guest_remapped) ps4_gnm_guest_remapped(ostart, oend - ostart);
+        dm_note_remap(ostart, oend - ostart);
         if (ostart > m->vaddr && oend < mend) {
             DirectMapping *tail = (DirectMapping *)calloc(1, sizeof(*tail));
             if (tail) {
@@ -152,7 +194,7 @@ void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
 // Physical address backing guest address `addr`, if it is mapped direct memory.
 static bool dm_lookup(uint64_t addr, uint64_t *start, uint64_t *end, uint64_t *phys) {
     bool ok = false;
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
     for (DirectMapping *m = g_dmaps; m; m = m->next) {
         if (addr >= m->vaddr && addr < m->vaddr + m->size) {
             *start = m->vaddr;
@@ -162,7 +204,7 @@ static bool dm_lookup(uint64_t addr, uint64_t *start, uint64_t *end, uint64_t *p
             break;
         }
     }
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
     return ok;
 }
 static int g_direct_inited = 0;
@@ -183,11 +225,11 @@ static size_t get_total_direct_mem_size(void) {
 }
 
 int ps4_direct_mem_init(void) {
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
     if (!g_direct_inited) {
         g_direct_blocks = (DirectMemBlock *)calloc(1, sizeof(DirectMemBlock));
         if (!g_direct_blocks) {
-            pthread_mutex_unlock(&g_direct_mutex);
+            dm_unlock();
             return -1;
         }
         g_direct_blocks->phys_offset = 0;
@@ -199,12 +241,12 @@ int ps4_direct_mem_init(void) {
         g_direct_inited = 1;
         dm_phys_init();
     }
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
     return 0;
 }
 
 void ps4_direct_mem_destroy(void) {
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
     DirectMemBlock *curr = g_direct_blocks;
     while (curr) {
         DirectMemBlock *next = curr->next;
@@ -213,7 +255,7 @@ void ps4_direct_mem_destroy(void) {
     }
     g_direct_blocks = NULL;
     g_direct_inited = 0;
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
 }
 
 size_t sceKernelGetDirectMemorySize(void) {
@@ -222,7 +264,7 @@ size_t sceKernelGetDirectMemorySize(void) {
 
 size_t sceKernelAvailableDirectMemorySize(void) {
     ps4_direct_mem_init();
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
     size_t free_total = 0;
     DirectMemBlock *curr = g_direct_blocks;
     while (curr) {
@@ -231,7 +273,7 @@ size_t sceKernelAvailableDirectMemorySize(void) {
         }
         curr = curr->next;
     }
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
     return free_total;
 }
 
@@ -247,7 +289,7 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
 
     ps4_direct_mem_init();
 
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
     DirectMemBlock *curr = g_direct_blocks;
     DirectMemBlock *best = NULL;
 
@@ -300,7 +342,7 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
     if (!best) {
         fprintf(stderr, "[ps4-mem] ERROR: sceKernelAllocateDirectMemory FAILED! len=%zu (%.2f MB)\n",
                 length, (double)length / (1024.0 * 1024.0));
-        pthread_mutex_unlock(&g_direct_mutex);
+        dm_unlock();
         return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
     }
 
@@ -337,7 +379,7 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
 
     best->is_free = 0;
     *physAddrOut = best->phys_offset;
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
 
     return 0;
 }
@@ -353,7 +395,7 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
 
     ps4_direct_mem_init();
 
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
     DirectMemBlock *curr = g_direct_blocks;
     DirectMemBlock *found = NULL;
     while (curr) {
@@ -368,7 +410,7 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
 
     if (!found) {
         fprintf(stderr, "[ps4-mem] ERROR: sceKernelMapDirectMemory: physAddr 0x%llx (len 0x%zx) not in an allocated block!\n", (unsigned long long)physAddr, length);
-        pthread_mutex_unlock(&g_direct_mutex);
+        dm_unlock();
         return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     }
 
@@ -386,7 +428,7 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
 
     if (vaddr == (uint64_t)-1) {
         fprintf(stderr, "[ps4-mem] ERROR: sceKernelMapDirectMemory failed to allocate VM extent! len=%zu align=%zu\n", aligned_len, alignment);
-        pthread_mutex_unlock(&g_direct_mutex);
+        dm_unlock();
         return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
     }
 
@@ -400,7 +442,7 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
     printf("[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=%p\n", (void *)vaddr);
     fflush(stdout);
 
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
     return 0;
 }
 
@@ -408,7 +450,7 @@ int sceKernelReleaseDirectMemory(off_t physAddr, size_t length) {
     (void)length;
     ps4_direct_mem_init();
 
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
     DirectMemBlock *curr = g_direct_blocks;
     while (curr) {
         if (!curr->is_free && curr->phys_offset == physAddr) {
@@ -431,12 +473,12 @@ int sceKernelReleaseDirectMemory(off_t physAddr, size_t length) {
                 if (curr->next) curr->next->prev = prev;
                 free(curr);
             }
-            pthread_mutex_unlock(&g_direct_mutex);
+            dm_unlock();
             return 0;
         }
         curr = curr->next;
     }
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
     return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
 }
 
@@ -736,7 +778,7 @@ void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx) {
         (void)searchEnd;
 
         ps4_direct_mem_init();
-        pthread_mutex_lock(&g_direct_mutex);
+        dm_lock();
         size_t free_total = 0;
         off_t best_start = searchStart;
         DirectMemBlock *curr = g_direct_blocks;
@@ -747,7 +789,7 @@ void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx) {
             }
             curr = curr->next;
         }
-        pthread_mutex_unlock(&g_direct_mutex);
+        dm_unlock();
 
         if (startOutGuest && startOutGuest < ctx->mem_size) {
             *(off_t *)(ctx->mem_base + startOutGuest) = best_start;
@@ -1026,7 +1068,7 @@ int sceKernelDirectMemoryQuery(off_t offset, int flags, OrbisDirectMemoryQueryIn
     }
     ps4_direct_mem_init();
 
-    pthread_mutex_lock(&g_direct_mutex);
+    dm_lock();
     DirectMemBlock *curr = g_direct_blocks;
     DirectMemBlock *target = NULL;
 
@@ -1048,14 +1090,14 @@ int sceKernelDirectMemoryQuery(off_t offset, int flags, OrbisDirectMemoryQueryIn
     }
 
     if (!target || target->is_free) {
-        pthread_mutex_unlock(&g_direct_mutex);
+        dm_unlock();
         return 0x8002000d; // ORBIS_KERNEL_ERROR_EACCES
     }
 
     info->start = (uint64_t)target->phys_offset;
     info->end = (uint64_t)(target->phys_offset + target->size);
     info->memoryType = 0; // Standard direct memory
-    pthread_mutex_unlock(&g_direct_mutex);
+    dm_unlock();
 
     return 0;
 }

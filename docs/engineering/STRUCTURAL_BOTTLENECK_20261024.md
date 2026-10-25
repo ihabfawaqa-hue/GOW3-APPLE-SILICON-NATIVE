@@ -333,3 +333,73 @@ its time is copying guest buffers (`BufferCache::RunGuestCopy`), which submissio
 Next for 60 FPS (16.7 ms frames): move guest buffer copies off the Vulkan recorder thread,
 cut the command processor's and the recorder's per-draw cost (~2,800 draws a frame), and
 reduce the GPU threads' combined share of the performance cores.
+
+# Part 5: per-draw cost, a deadlock, and the next limit (2026-10-25)
+
+## Recording race: not found in normal play
+
+The crashes in `DynamicState::CommitWith` and `mtl_barrier_after_encoder_stages` suggested two
+threads recording into one command buffer. `GOW3_RECORDING_CHECK=1` now checks this exactly: a
+thread that takes the raw command buffer (`Scheduler::CommandBuffer()`) owns it until its
+`KickRecording()` or submission, and any `Record()`, recorder chunk, kick or submission by another
+thread in that span is reported with both threads' names and a stack; direct `Record()` calls,
+recorder chunks and submissions are also checked against each other. The first version's
+"within 2 ms" heuristic and a mark taken before `SyncRecording()` reported false positives.
+Two 230 s gameplay runs with the exact check: no report, no crash. The only raw-buffer user on the
+command processor is the presenter's `PrepareFrame` (flip), which runs after the draw pipe is
+drained. The check stays as a diagnostic.
+
+## Deadlock: direct memory against the texture cache
+
+One run in about ten froze in gameplay (no frames, every GPU thread waiting). The stacks:
+
+- the game's main thread, in a write-fault handler: `Rasterizer::OnWriteFault` →
+  `TextureCache::InvalidateMemory` (holds the texture cache mutex) → page protection →
+  waits for the runtime's direct-memory mutex;
+- `SceFiosCallback`, mapping direct memory: `dm_alias` holds the direct-memory mutex and calls
+  `ps4_gnm_guest_remapped` → `Rasterizer::InvalidateMemory` → waits for the texture cache mutex.
+
+The renderer takes its cache locks before guest memory locks everywhere else
+(`recomp_guest_memory_suspend_thread_lock` exists for this order). `ps4_direct_mem.c` now queues
+the ranges remapped under `g_direct_mutex` per thread and notifies the renderer after the mutex is
+released (`dm_lock`/`dm_unlock`). Five 250 s runs since: no freeze.
+
+## Per-draw cost on the command processor
+
+CPU samples of the command processor in gameplay: `RefreshGraphicsKey` was 47% of its time, and
+copies of guest memory (`CopySparseMemory`) 29%:
+
+- `ParseFetchShader` copied the whole 16 KB fetch shader window for every draw and only then
+  looked up its cache. It now looks up the cache by the code address first and compares only the
+  cached code (a few dozen words): 12.8% → 0.9%.
+- `GetParams` copied and compared each stage's code (a few KB) for every draw. An entry checked
+  during the current submission is now reused without the copy (`Gow3Stats::submission_epoch`,
+  counted at the end of every graphics submission; toggle `ShaderCodeOncePerSubmission`,
+  bit 58): 6.4% → 2.8%.
+
+Copies overall fell from 29% to 10% of the command processor's time; it went from 92% to 71% busy
+and is no longer the busiest thread. The picture is unchanged (gameplay frame dump at 200 s).
+
+## Guest buffer copies off the Vulkan recorder
+
+`PoolSmallCopies` (bit 19 disabled: copy threads instead of the recorder) was measured twice:
+
+| Scene | Recorder copies | Copy pool |
+|---|---|---|
+| Opening combat, cool | 36.7 FPS | 36.2 FPS |
+| Later combat, hot (2 runs each, windows from 175 s) | 24.1, 27.7 FPS; command processor blocked on host copies 13–15%, recorder 6–9% | 28.1, 24.9 FPS; 7%, 2% |
+
+The pool halves the command processor's blocking in heavy scenes, but frame rate does not move,
+so the default is unchanged. Host-copy waits are long with recorder copies because the copies run
+in order on the recorder: a guest-visible write (labels, `WRITE_DATA`, `RELEASE_MEM`) waits for
+every chunk queued before the last copy.
+
+## The next limit: the game's main thread spinning
+
+With the command processor lighter, the busiest thread is the game's main thread (93%). 37% of
+its samples are in one guest function, `fn_0x1a5d10`: `while (*flag != 0) pause;` called from
+`fn_0x1b00c0`, i.e. it spins on a performance core waiting for its worker threads' jobs. The
+machine is CPU-bound (main thread, audio `brbDriver` 82%, Vulkan recorder 80%, command processor
+71%, draw recorder 59%, five job workers ~45% each on four performance cores), and FPS in heavy
+scenes is 22–30 when hot. Next: let that wait give up its core (spin briefly, then block) and
+measure whether the workers finish sooner.

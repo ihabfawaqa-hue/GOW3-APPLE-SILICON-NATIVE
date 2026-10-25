@@ -3,6 +3,9 @@
 
 #include <thread>
 #include <algorithm>
+#include <execinfo.h>
+#include <set>
+#include <pthread.h>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
@@ -205,6 +208,96 @@ void Scheduler::EndRendering(std::source_location caller) {
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
 }
 
+namespace {
+std::atomic<u32> recording_reports{0};
+
+u64 CurrentThreadKey() {
+    return static_cast<u64>(reinterpret_cast<uintptr_t>(pthread_self()));
+}
+std::string ThreadName(u64 key) {
+    char name[64] = "?";
+    pthread_getname_np(reinterpret_cast<pthread_t>(static_cast<uintptr_t>(key)), name, sizeof(name));
+    return name;
+}
+void ReportRecordingConflict(const char* what, u64 other, const char* other_where,
+                             const char* where) {
+    if (recording_reports.fetch_add(1, std::memory_order_relaxed) >= 12) {
+        return;
+    }
+    std::fprintf(stderr, "[recording-check] %s: '%s' (%s) while '%s' (%s)\n", what,
+                 ThreadName(CurrentThreadKey()).c_str(), where, ThreadName(other).c_str(),
+                 other_where ? other_where : "raw command buffer");
+    void* frames[24];
+    const int count = backtrace(frames, 24);
+    backtrace_symbols_fd(frames, count, 2);
+}
+} // namespace
+
+bool Scheduler::RecordingCheckEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_RECORDING_CHECK");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+bool Scheduler::RecordingEnter(const char* where) {
+    const u64 me = CurrentThreadKey();
+    CheckRawOwner(where);
+    u64 expected = 0;
+    if (check_owner.compare_exchange_strong(expected, me, std::memory_order_acq_rel)) {
+        check_where.store(where, std::memory_order_relaxed);
+        return true;
+    }
+    if (expected != me) {
+        ReportRecordingConflict("concurrent recording", expected,
+                                check_where.load(std::memory_order_relaxed), where);
+    }
+    return false;
+}
+
+void Scheduler::CheckRawOwner(const char* where) {
+    const u64 raw = check_raw_owner.load(std::memory_order_acquire);
+    if (raw && raw != CurrentThreadKey()) {
+        ReportRecordingConflict("used while another thread holds the raw command buffer", raw,
+                                "raw command buffer", where);
+    }
+}
+
+void Scheduler::ReleaseRawCommandBuffer(const char* where) {
+    if (RecordingCheckEnabled()) [[unlikely]] {
+        CheckRawOwner(where);
+        check_raw_owner.store(0, std::memory_order_release);
+    }
+}
+
+void Scheduler::RecordingExit(bool owned) {
+    if (owned) {
+        check_owner.store(0, std::memory_order_release);
+    }
+}
+
+void Scheduler::NoteRawCommandBuffer() {
+    CheckRawOwner("raw command buffer");
+    check_raw_owner.store(CurrentThreadKey(), std::memory_order_release);
+    // Each (thread, call site) taking the raw buffer, once, with its stack.
+    static std::mutex mutex;
+    static std::set<std::pair<std::string, void*>> seen;
+    void* frames[16];
+    const int count = backtrace(frames, 16);
+    if (count < 3) {
+        return;
+    }
+    const auto key = std::make_pair(ThreadName(CurrentThreadKey()), frames[2]);
+    std::scoped_lock lk{mutex};
+    if (seen.size() > 64 || !seen.insert(key).second) {
+        return;
+    }
+    std::fprintf(stderr, "[recording-check] raw command buffer taken by '%s':\n",
+                 key.first.c_str());
+    backtrace_symbols_fd(frames, count, 2);
+}
+
 void Scheduler::LabelCommandBuffer(std::string label) {
     if (!PassLabelsEnabled()) {
         return;
@@ -315,6 +408,7 @@ void Scheduler::KickRecording(bool force) {
         return;
     }
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
+    ReleaseRawCommandBuffer("kick");
     direct_mode = false;
     // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
     if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
@@ -388,7 +482,13 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
             recorder_busy = true;
         }
         // current_cmdbuf only changes after SyncRecording(), which waits for this thread.
-        chunk->Execute(current_cmdbuf);
+        if (RecordingCheckEnabled()) [[unlikely]] {
+            const bool owned = RecordingEnter("recorder chunk");
+            chunk->Execute(current_cmdbuf);
+            RecordingExit(owned);
+        } else {
+            chunk->Execute(current_cmdbuf);
+        }
         {
             std::scoped_lock lk{recorder_mutex};
             free_chunks.push_back(std::move(chunk));
@@ -522,7 +622,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     SyncRecording();
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
+    const bool submit_owned = RecordingCheckEnabled() && RecordingEnter("submission");
     Check(current_cmdbuf.end());
+    RecordingExit(submit_owned);
 
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);

@@ -69,6 +69,7 @@ enum : std::uint64_t {
     // when nothing moves. Static-camera flicker of railings/window bars p99.9 -45% (2026-10-03).
     TaaKeepNearerHistory = 1ull << 55,
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
+    ShaderCodeOncePerSubmission = 1ull << 58, ///< GetParams revalidates each shader per submission
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
@@ -87,6 +88,9 @@ inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
 inline std::atomic<unsigned long> gpu_thread_id{0}; ///< Windows thread id of the GPU command thread
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
+/// Graphics submissions the GPU command thread has finished, always counted: guest memory a
+/// submission's draws read (shader code) is stable until it ends.
+inline std::atomic<std::uint64_t> submission_epoch{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 inline std::atomic<std::uint64_t> backing_swaps{0}, backing_swap_pixels{0},

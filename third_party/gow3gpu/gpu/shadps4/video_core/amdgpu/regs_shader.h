@@ -13,6 +13,7 @@
 #include <vector>
 #include "common/assert.h"
 #include "common/types.h"
+#include "gow3_toggles.h"
 #include "core/memory.h"
 #include "shader_recompiler/params.h"
 
@@ -279,21 +280,32 @@ static Shader::ShaderParams GetParams(const auto& sh) {
         const char* value = std::getenv("GOW3_SHADER_CODE_CACHE");
         return !(value && value[0] == '0');
     }();
+    // The guest does not rewrite the code a submission draws with before it ends, so an
+    // entry checked during the current submission is reused without the copy (most stages
+    // repeat across a submission's draws).
     struct Cached {
         std::vector<u32> bytes; // guest words from the base through the binary info
         u64 hash;
         std::shared_ptr<std::vector<u32>> code;
+        u64 checked_epoch = ~0ull;
     };
     thread_local std::unordered_map<VAddr, Cached> cache;
     thread_local std::vector<u32> scratch;
     if (use_cache) {
         if (const auto it = cache.find(base); it != cache.end()) {
-            const auto& entry = it->second;
+            auto& entry = it->second;
+            const u64 epoch = Gow3Stats::submission_epoch.load(std::memory_order_acquire);
+            if (entry.checked_epoch == epoch &&
+                !Gow3Toggle::Disabled(Gow3Toggle::ShaderCodeOncePerSubmission)) {
+                return Shader::ShaderParams{sh.user_data, std::span<const u32>{*entry.code},
+                                            entry.hash, base, entry.code};
+            }
             scratch.resize(entry.bytes.size());
             if (memory->CopySparseMemory(base, reinterpret_cast<u8*>(scratch.data()),
                                          scratch.size() * sizeof(u32)) &&
                 std::memcmp(scratch.data(), entry.bytes.data(),
                             scratch.size() * sizeof(u32)) == 0) {
+                entry.checked_epoch = epoch;
                 return Shader::ShaderParams{sh.user_data, std::span<const u32>{*entry.code},
                                             entry.hash, base, entry.code};
             }
@@ -327,7 +339,8 @@ static Shader::ShaderParams GetParams(const auto& sh) {
                 cache.clear(); // addresses of shaders the game has since freed
             }
             cache[base] = Cached{std::vector<u32>(code->begin(), code->begin() + words),
-                                 bininfo->shader_hash, stored};
+                                 bininfo->shader_hash, stored,
+                                 Gow3Stats::submission_epoch.load(std::memory_order_acquire)};
             break;
         }
     }

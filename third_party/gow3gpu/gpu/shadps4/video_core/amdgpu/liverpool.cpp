@@ -1443,6 +1443,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     if (draw_prep) {
         draw_prep->EndSubmission();
     }
+    Gow3Stats::submission_epoch.fetch_add(1, std::memory_order_release);
     if (seq != NoSeq && Gow3Stats::enabled) {
         Gow3Stats::submissions.fetch_add(1, std::memory_order_relaxed);
 #if defined(__linux__) // gow3: per-thread rusage statistics are Linux-only

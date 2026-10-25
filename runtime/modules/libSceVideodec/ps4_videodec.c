@@ -53,6 +53,8 @@ _Static_assert(sizeof(Ps4VideodecPictureInfo) == 112,
 typedef struct Ps4VideodecInstance {
   AVCodecContext *codec;
   struct SwsContext *scaler;
+  uint8_t *output_pixels;
+  size_t output_capacity;
   uint64_t generation;
   uint64_t max_frame_buffer_size;
   uint32_t max_width;
@@ -110,6 +112,9 @@ static void destroy_instance_locked(Ps4VideodecInstance *instance) {
   avcodec_free_context(&instance->codec);
   sws_freeContext(instance->scaler);
   instance->scaler = NULL;
+  free(instance->output_pixels);
+  instance->output_pixels = NULL;
+  instance->output_capacity = 0;
   instance->max_frame_buffer_size = 0;
   instance->max_width = 0;
   instance->max_height = 0;
@@ -176,7 +181,6 @@ int32_t ps4_videodec_compute_resource_info(
 static int32_t convert_frame_to_nv12(Ps4VideodecInstance *instance,
                                      const AVFrame *frame,
                                      uint64_t fallback_pts,
-                                     uint64_t attached_data,
                                      uint64_t framebuffer_size,
                                      uint8_t **pixels_out,
                                      size_t *pixels_size_out,
@@ -205,27 +209,61 @@ static int32_t convert_frame_to_nv12(Ps4VideodecInstance *instance,
       total_size > PS4_VIDEODEC_MAX_FRAME_SIZE || total_size > SIZE_MAX)
     return (int32_t)ORBIS_VIDEODEC_ERROR_FRAME_BUFFER_SIZE;
 
-  uint8_t *pixels = (uint8_t *)calloc(1, (size_t)total_size);
-  if (!pixels)
-    return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
+  if (instance->output_capacity < (size_t)total_size) {
+    uint8_t *output = (uint8_t *)realloc(instance->output_pixels,
+                                         (size_t)total_size);
+    if (!output)
+      return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
+    instance->output_pixels = output;
+    instance->output_capacity = (size_t)total_size;
+  }
+  uint8_t *pixels = instance->output_pixels;
   uint8_t *dst[4] = {pixels, pixels + y_size, NULL, NULL};
   int dst_linesize[4] = {(int)pitch, (int)pitch, 0, 0};
-  instance->scaler = sws_getCachedContext(
-      instance->scaler, frame->width, frame->height,
-      (enum AVPixelFormat)frame->format, frame->width, frame->height,
-      AV_PIX_FMT_NV12, SWS_BILINEAR, NULL, NULL, NULL);
-  if (!instance->scaler) {
-    free(pixels);
-    return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
+  if (frame->format == AV_PIX_FMT_NV12) {
+    for (int y = 0; y < frame->height; ++y) {
+      memcpy(dst[0] + (size_t)y * pitch,
+             frame->data[0] + (ptrdiff_t)y * frame->linesize[0],
+             (size_t)frame->width);
+    }
+    for (int y = 0; y < frame->height / 2; ++y) {
+      memcpy(dst[1] + (size_t)y * pitch,
+             frame->data[1] + (ptrdiff_t)y * frame->linesize[1],
+             (size_t)frame->width);
+    }
+  } else {
+    instance->scaler = sws_getCachedContext(
+        instance->scaler, frame->width, frame->height,
+        (enum AVPixelFormat)frame->format, frame->width, frame->height,
+        AV_PIX_FMT_NV12, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+    if (!instance->scaler)
+      return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
+
+    const int rows = sws_scale(instance->scaler,
+                               (const uint8_t *const *)frame->data,
+                               frame->linesize, 0, frame->height, dst,
+                               dst_linesize);
+    if (rows != frame->height)
+      return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
   }
 
-  const int rows = sws_scale(instance->scaler,
-                             (const uint8_t *const *)frame->data,
-                             frame->linesize, 0, frame->height, dst,
-                             dst_linesize);
-  if (rows != frame->height) {
-    free(pixels);
-    return (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL;
+  // The PS4 frame buffer includes aligned rows. Repeat the last image row so
+  // padded storage is deterministic and does not introduce a black/green edge.
+  for (uint32_t y = 0; y < padded_height; ++y) {
+    uint8_t *row = dst[0] + (size_t)y * pitch;
+    if (y >= (uint32_t)frame->height)
+      memcpy(row, dst[0] + (size_t)(frame->height - 1) * pitch,
+             (size_t)frame->width);
+    if (pitch > (uint32_t)frame->width)
+      memset(row + frame->width, 0, pitch - (uint32_t)frame->width);
+  }
+  for (uint32_t y = 0; y < padded_height / 2; ++y) {
+    uint8_t *row = dst[1] + (size_t)y * pitch;
+    if (y >= (uint32_t)frame->height / 2)
+      memcpy(row, dst[1] + (size_t)(frame->height / 2 - 1) * pitch,
+             (size_t)frame->width);
+    if (pitch > (uint32_t)frame->width)
+      memset(row + frame->width, 0, pitch - (uint32_t)frame->width);
   }
 
   memset(picture_out, 0, sizeof(*picture_out));
@@ -237,7 +275,7 @@ static int32_t convert_frame_to_nv12(Ps4VideodecInstance *instance,
   picture_out->pts = frame->pts != AV_NOPTS_VALUE
                          ? (uint64_t)frame->pts
                          : fallback_pts;
-  picture_out->attached_data = attached_data;
+  picture_out->attached_data = (uint64_t)(uintptr_t)frame->opaque;
   picture_out->codec.avc.colour_primaries =
       (uint8_t)frame->color_primaries;
   picture_out->codec.avc.transfer_characteristics =
@@ -366,6 +404,7 @@ void shim_sceVideodecCreateDecoder(GuestContext *ctx) {
   avctx->width = (int)width;
   avctx->height = (int)height;
   avctx->thread_count = 1;
+  avctx->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
   if (avcodec_open2(avctx, codec, NULL) < 0) {
     avcodec_free_context(&avctx);
     shim_finish(ctx, (int32_t)ORBIS_VIDEODEC_ERROR_API_FAIL);
@@ -517,12 +556,12 @@ static int32_t decode_one(GuestContext *ctx, uint64_t control_addr,
     memcpy(packet->data, access_unit, (size_t)input.access_unit_size);
     packet->pts = (int64_t)input.pts;
     packet->dts = (int64_t)input.dts;
+    packet->opaque = (void *)(uintptr_t)input.attached_data;
   }
   free(access_unit);
 
   int32_t result = 0;
   uint64_t fallback_pts = flush ? 0 : input.pts;
-  uint64_t attached_data = flush ? 0 : input.attached_data;
   int have_frame = 0;
   pthread_mutex_lock(&g_decoder_mutex);
   Ps4VideodecInstance *instance = find_instance_locked(control.handle);
@@ -530,6 +569,10 @@ static int32_t decode_one(GuestContext *ctx, uint64_t control_addr,
     result = (int32_t)ORBIS_VIDEODEC_ERROR_HANDLE;
   } else {
     int sent = avcodec_send_packet(instance->codec, packet);
+    if (!flush && sent == AVERROR_EOF) {
+      avcodec_flush_buffers(instance->codec);
+      sent = avcodec_send_packet(instance->codec, packet);
+    }
     if (sent == AVERROR(EAGAIN)) {
       const int received = avcodec_receive_frame(instance->codec, frame);
       if (received >= 0) {
@@ -549,7 +592,6 @@ static int32_t decode_one(GuestContext *ctx, uint64_t control_addr,
 
     if (result == 0 && have_frame) {
       result = convert_frame_to_nv12(instance, frame, fallback_pts,
-                                     attached_data,
                                      framebuffer.frame_buffer_size, &pixels,
                                      &pixels_size, &picture);
       if (result == 0 && !instance->logged_first_frame) {
@@ -560,16 +602,17 @@ static int32_t decode_one(GuestContext *ctx, uint64_t control_addr,
                 picture.frame_height, picture.pts);
       }
     }
+    if (result == 0) {
+      // Keep the decoder lock until the reusable scratch buffer has been
+      // copied into guest memory; another decode on this handle must not
+      // overwrite it while the copy is in flight.
+      result = write_picture(ctx, picture_addr, &framebuffer, &picture, pixels,
+                             pixels_size);
+    }
   }
   pthread_mutex_unlock(&g_decoder_mutex);
   av_frame_free(&frame);
   av_packet_free(&packet);
-
-  if (result == 0) {
-    result = write_picture(ctx, picture_addr, &framebuffer, &picture, pixels,
-                           pixels_size);
-  }
-  free(pixels);
   return result;
 }
 

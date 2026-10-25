@@ -141,6 +141,8 @@ int gow3gpu_text_input_poll(char *out_utf8, uint64_t size);
  * poll: -1 while open, -2 cancelled, else the chosen index. */
 int gow3gpu_choice_begin(const char *title, const char *const *items, const char *const *images, int count, int focus);
 int gow3gpu_choice_poll(void);
+/* A short notice at the top of the screen (quick save), shown for `milliseconds`. */
+int gow3gpu_notify(const char* text, int milliseconds);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int gow3gpu_overlay_captures_input(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */

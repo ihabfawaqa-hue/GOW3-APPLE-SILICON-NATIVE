@@ -176,6 +176,10 @@ static void open_list(GuestContext *ctx, const uint8_t *param) {
             focus = n;
         }
     }
+    // F9 (quick load) asked for the quick save.
+    const char *quick = g_dlg.type == ORBIS_SAVE_DATA_DIALOG_TYPE_LOAD ? ps4_savedata_quick_load_focus() : NULL;
+    for (int i = 0; quick && i < g_dlg.dir_count; ++i)
+        if (!strcmp(g_dlg.dirs[i], quick)) focus = i + g_dlg.has_new;
 
     int choice;
     if (auto_choice(&choice)) {

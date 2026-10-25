@@ -53,4 +53,7 @@ void BeginChoice(const std::string& title, const std::vector<std::string>& items
                  std::vector<Gow3Png::Image> pictures, int focus);
 int PollChoice();
 
+/// A short notice at the top of the screen for `milliseconds` (any thread). Takes no input.
+void Notify(const std::string& text, int milliseconds);
+
 } // namespace Gow3Overlay

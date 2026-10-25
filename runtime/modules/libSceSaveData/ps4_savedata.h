@@ -97,6 +97,14 @@ bool ps4_savedata_read_dir_info(int32_t user_id, const char *dir_name,
 // Host path of <save root>/user_<uid>/<dirName>; false when it is not an existing directory.
 bool ps4_savedata_dir_path(int32_t user_id, const char *dir_name, char *out, size_t out_size);
 
+// Quick save (F5): copies the game's latest checkpoint (AUTOSAVE) to QUICKSAVE<n>. `msg`
+// receives the line shown to the player. The previous quick save is kept on failure.
+bool ps4_savedata_quick_save(int slot_number, char *msg, size_t msg_size);
+// Quick load (F9): the next Load list (within two minutes) opens on QUICKSAVE1;
+// ps4_savedata_quick_load_focus returns that directory name once, or NULL.
+bool ps4_savedata_quick_load_request(char *msg, size_t msg_size);
+const char *ps4_savedata_quick_load_focus(void);
+
 // C API
 int32_t sceSaveDataInitialize(const void *param);
 int32_t sceSaveDataInitialize2(const void *param);

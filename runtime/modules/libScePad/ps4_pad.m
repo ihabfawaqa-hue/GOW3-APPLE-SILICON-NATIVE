@@ -24,6 +24,9 @@ static int32_t g_next_pad_handle = 1;
 static int g_pad_inited = 0;
 
 int ps4_gow3gpu_overlay_captures_input(void);
+int ps4_gow3gpu_notify(const char *text, int milliseconds);
+bool ps4_savedata_quick_save(int slot_number, char *msg, size_t msg_size);
+bool ps4_savedata_quick_load_request(char *msg, size_t msg_size);
 static uint32_t g_key_buttons = 0;
 static uint8_t g_key_l2 = 0;
 static uint8_t g_key_r2 = 0;
@@ -112,7 +115,24 @@ static int g_key_rx_down = 0;
 static int g_key_rx_left = 0;
 static int g_key_rx_right = 0;
 
+// F5: quick save (a copy of the game's last checkpoint, see ps4_savedata.c); F9: quick load (the
+// next Load list opens on the quick save). Handled here, not passed to the game; a held key or
+// auto-repeat acts once.
+static void ps4_pad_quick_key(unsigned short keyCode, int isDown) {
+  static int f5_down, f9_down;
+  int *held = keyCode == 96 ? &f5_down : keyCode == 101 ? &f9_down : NULL;
+  if (!held) return;
+  if (!isDown) { *held = 0; return; }
+  if (*held) return;
+  *held = 1;
+  char msg[300];
+  if (keyCode == 96) ps4_savedata_quick_save(1, msg, sizeof(msg));
+  else ps4_savedata_quick_load_request(msg, sizeof(msg));
+  ps4_gow3gpu_notify(msg, 4000);
+}
+
 void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
+  ps4_pad_quick_key(keyCode, isDown);
   pthread_mutex_lock(&g_pad_mutex);
 
   uint32_t btn = 0;
@@ -308,6 +328,7 @@ void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
 //                                                draws (needs PS4_SCREENSHOT_DIR)
 //   trace                                        log the GPU work of the next frame
 //   close / terminate                            quit through the window close button / Cmd+Q
+//   key <macOS keycode>                          a host key (key 96 = F5, quick save)
 // Stick values are 0..255 (128 = center); -1 keeps the stick untouched.
 // Menus auto-repeat a held direction: Uncharted 4's menus move twice for a 300 ms hold and
 // once for 100 ms, so taps should be short.
@@ -315,12 +336,16 @@ __attribute__((weak)) volatile int g_ps4_screenshot_request = 0;
 __attribute__((weak)) volatile int g_ps4_gnm_dump_request = 0;
 typedef enum {
   PAD_CTL_HOLD, PAD_CTL_SHOT, PAD_CTL_DUMPRT, PAD_CTL_DUMPDRAWS, PAD_CTL_TRACE, PAD_CTL_CLOSE,
-  PAD_CTL_TERMINATE
+  PAD_CTL_TERMINATE, PAD_CTL_KEY
 } PadCtlKind;
 typedef struct { PadCtlKind kind; long dur; uint32_t mask; int lx, ly, rx, ry; } PadCtlCmd;
 
-static void ps4_pad_control_action(PadCtlKind kind) {
+static void ps4_pad_control_action(PadCtlKind kind, uint32_t code) {
   switch (kind) {
+  case PAD_CTL_KEY: // a host key handled outside the pad (F5 quick save)
+    ps4_pad_quick_key((unsigned short)code, 1);
+    ps4_pad_quick_key((unsigned short)code, 0);
+    break;
   case PAD_CTL_SHOT: g_ps4_screenshot_request = 1; break;
   case PAD_CTL_DUMPRT: g_ps4_gnm_dump_request |= 1; break;
   case PAD_CTL_DUMPDRAWS: g_ps4_gnm_dump_request |= 2; break;
@@ -381,6 +406,9 @@ static void ps4_pad_control_file(uint32_t *buttons, uint8_t *lx, uint8_t *ly, ui
       cmd.kind = PAD_CTL_CLOSE;
     } else if (strncmp(line, "terminate", 9) == 0) {
       cmd.kind = PAD_CTL_TERMINATE;
+    } else if (strncmp(line, "key", 3) == 0) {
+      cmd.kind = PAD_CTL_KEY;
+      cmd.mask = (uint32_t)strtoul(line + 3, NULL, 10);
     } else if (line[0] == 'w') {
       cmd.dur = strtol(line + 1, NULL, 10);
     } else if (line[0] == 'p') {
@@ -413,7 +441,7 @@ static void ps4_pad_control_file(uint32_t *buttons, uint8_t *lx, uint8_t *ly, ui
     cur = queue[q_head];
     q_head = (q_head + 1) % 512;
     if (cur.kind != PAD_CTL_HOLD) {
-      ps4_pad_control_action(cur.kind);
+      ps4_pad_control_action(cur.kind, cur.mask);
       continue;
     }
     cur_end_us = now + (uint64_t)(cur.dur > 0 ? cur.dur : 0) * 1000;

@@ -26,6 +26,9 @@ int ps4_gow3gpu_choice_poll(void);
 /* The overlay (its menu, text entry or list picker) has the keyboard and pad. */
 int ps4_gow3gpu_overlay_captures_input(void);
 
+/* A short notice drawn over the game for `milliseconds` (0 when no overlay is available). */
+int ps4_gow3gpu_notify(const char *text, int milliseconds);
+
 #ifdef __cplusplus
 }
 #endif

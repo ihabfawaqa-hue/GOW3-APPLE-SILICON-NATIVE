@@ -647,6 +647,7 @@ typedef struct SdMountSlot {
 } SdMountSlot;
 
 static SdMountSlot g_sd_mounts[SD_MAX_MOUNTS];
+static int32_t g_sd_last_user = 0x10000000; /* the user of the latest mount (quick save) */
 
 #define SD_LOG_ONCE(msg)                                                       \
     do {                                                                       \
@@ -866,6 +867,7 @@ int32_t sceSaveDataMount2(GuestContext *ctx, const SdMount2 *mount, SdMountResul
     memset(slot, 0, sizeof(*slot));
     slot->active = true;
     slot->user_id = mount->userId;
+    g_sd_last_user = mount->userId;
     snprintf(slot->dir_name, sizeof(slot->dir_name), "%s", dir_name);
     snprintf(slot->mount_point, sizeof(slot->mount_point), "/savedata%d", slot_idx);
     snprintf(slot->host_path, sizeof(slot->host_path), "%s", host_path);
@@ -1192,4 +1194,148 @@ void shim_sceSaveDataDirNameSearch(GuestContext *ctx) {
     SdDirNameSearchResult *result = (SdDirNameSearchResult *)recomp_guest_to_host(ctx, ctx->rsi);
     ctx->rax = (uint64_t)(int64_t)sceSaveDataDirNameSearch(ctx, cond, result);
     SHIM_RETURN();
+}
+
+//=============================================================================
+// Quick save (F5): a copy of the game's latest checkpoint.
+//
+// God of War III writes its checkpoint to AUTOSAVE. A quick save copies that directory to
+// QUICKSAVE<n>: it is the checkpoint the game last wrote, not the moment F5 was pressed. The
+// copy is written beside the slot, checked, then swapped in, so a failed copy keeps the
+// previous quick save; the player's other saves are never touched.
+//=============================================================================
+#define SD_QUICK_SOURCE "AUTOSAVE"
+
+static int sd_copy_file(const char *src, const char *dst) {
+    FILE *in = fopen(src, "rb");
+    if (!in) return -1;
+    FILE *out = fopen(dst, "wb");
+    if (!out) { fclose(in); return -1; }
+    char buf[65536];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
+    }
+    if (ferror(in)) rc = -1;
+    fclose(in);
+    if (fflush(out) != 0 || fsync(fileno(out)) != 0) rc = -1;
+    if (fclose(out) != 0) rc = -1;
+    return rc;
+}
+
+/* Copies the files of src (one level of subdirectories, e.g. sce_sys) to dst. */
+static int sd_copy_tree(const char *src, const char *dst, int depth) {
+    if (mkdir(dst, 0755) != 0 && errno != EEXIST) return -1;
+    DIR *d = opendir(src);
+    if (!d) return -1;
+    int rc = 0;
+    struct dirent *e;
+    while (rc == 0 && (e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char from[1200], to[1200];
+        snprintf(from, sizeof(from), "%s/%s", src, e->d_name);
+        snprintf(to, sizeof(to), "%s/%s", dst, e->d_name);
+        struct stat st;
+        if (stat(from, &st) != 0) { rc = -1; break; }
+        if (S_ISDIR(st.st_mode)) rc = depth < 4 ? sd_copy_tree(from, to, depth + 1) : -1;
+        else if (S_ISREG(st.st_mode)) rc = sd_copy_file(from, to);
+    }
+    closedir(d);
+    return rc;
+}
+
+static uint64_t sd_tree_bytes(const char *path) {
+    g_sd_du_total = 0;
+    nftw(path, sd_du_cb, 16, FTW_PHYS);
+    return g_sd_du_total;
+}
+
+static void sd_remove_tree(const char *path) {
+    if (sd_is_dir(path)) nftw(path, sd_rm_cb, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+bool ps4_savedata_quick_save(int slot_number, char *msg, size_t msg_size) {
+    if (slot_number < 1 || slot_number > 9) slot_number = 1;
+    pthread_mutex_lock(&g_savedata_mutex);
+    const int32_t user = g_sd_last_user;
+    char src[1024], dst[1024], tmp[1100], old[1100], name[SD_DIRNAME_SIZE];
+    snprintf(name, sizeof(name), "QUICKSAVE%d", slot_number);
+    sd_dir_path(user, SD_QUICK_SOURCE, src, sizeof(src));
+    sd_dir_path(user, name, dst, sizeof(dst));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", dst);
+    snprintf(old, sizeof(old), "%s.old", dst);
+    bool ok = false;
+    SdParam p;
+    if (!sd_is_dir(src) || !sd_load_param(src, &p)) {
+        snprintf(msg, msg_size, "Quick save: no checkpoint yet (the game has not autosaved).");
+    } else if (sd_find_mount_by_dir(user, SD_QUICK_SOURCE)) {
+        snprintf(msg, msg_size, "Quick save: the game is writing its checkpoint. Try again in a moment.");
+    } else {
+        sd_remove_tree(tmp);
+        const uint64_t bytes = sd_tree_bytes(src);
+        if (sd_copy_tree(src, tmp, 0) != 0 || sd_tree_bytes(tmp) != bytes) {
+            sd_remove_tree(tmp);
+            snprintf(msg, msg_size, "Quick save %d failed: the checkpoint could not be copied.", slot_number);
+        } else {
+            // "(Auto Save) Mount Olympus" becomes "(Quick Save 1) Mount Olympus"; the date stays
+            // the checkpoint's.
+            const char *place = p.subTitle;
+            if (!strncmp(place, "(Auto Save) ", 12)) place += 12;
+            char location[128];
+            snprintf(location, sizeof(location), "%s", place);
+            snprintf(p.subTitle, sizeof(p.subTitle), "(Quick Save %d) %s", slot_number, location);
+            sd_store_param(tmp, &p);
+            sd_remove_tree(old);
+            const bool had_slot = sd_is_dir(dst);
+            if (had_slot && rename(dst, old) != 0) {
+                sd_remove_tree(tmp);
+                snprintf(msg, msg_size, "Quick save %d failed: the previous quick save is kept.", slot_number);
+            } else if (rename(tmp, dst) != 0) {
+                if (had_slot) rename(old, dst);
+                sd_remove_tree(tmp);
+                snprintf(msg, msg_size, "Quick save %d failed: the previous quick save is kept.", slot_number);
+            } else {
+                sd_remove_tree(old);
+                char when[32] = "";
+                if (p.mtime > 0) {
+                    time_t t = (time_t)p.mtime;
+                    struct tm tm;
+                    localtime_r(&t, &tm);
+                    strftime(when, sizeof(when), " (%H:%M)", &tm);
+                }
+                snprintf(msg, msg_size, "Quick save %d: last checkpoint, %s%s. Load it from Load in the main menu.",
+                         slot_number, location, when);
+                ok = true;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_savedata_mutex);
+    fprintf(stderr, "[ps4-savedata] %s\n", msg);
+    return ok;
+}
+
+/* Quick load (F9): the game loads only through its own Load list, so F9 asks the next Load list
+ * to open on the quick save (two minutes). */
+static int64_t g_quick_load_until;
+
+bool ps4_savedata_quick_load_request(char *msg, size_t msg_size) {
+    pthread_mutex_lock(&g_savedata_mutex);
+    char dst[1024];
+    sd_dir_path(g_sd_last_user, "QUICKSAVE1", dst, sizeof(dst));
+    const bool exists = sd_is_dir(dst);
+    if (exists) g_quick_load_until = (int64_t)time(NULL) + 120;
+    pthread_mutex_unlock(&g_savedata_mutex);
+    snprintf(msg, msg_size, exists ? "Quick load: open Load (pause or main menu); Quick Save 1 is selected."
+                                   : "Quick load: no quick save yet (F5 saves the last checkpoint).");
+    fprintf(stderr, "[ps4-savedata] %s\n", msg);
+    return exists;
+}
+
+const char *ps4_savedata_quick_load_focus(void) {
+    pthread_mutex_lock(&g_savedata_mutex);
+    const bool pending = g_quick_load_until && (int64_t)time(NULL) <= g_quick_load_until;
+    g_quick_load_until = 0;
+    pthread_mutex_unlock(&g_savedata_mutex);
+    return pending ? "QUICKSAVE1" : NULL;
 }

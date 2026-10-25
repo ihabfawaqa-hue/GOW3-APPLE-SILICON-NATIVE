@@ -35,6 +35,12 @@ static ChoiceBeginFn g_choice_begin;
 static ChoicePollFn g_choice_poll;
 typedef int (*CapturesInputFn)(void);
 static CapturesInputFn g_captures_input;
+typedef int (*NotifyFn)(const char *text, int milliseconds);
+static NotifyFn g_notify;
+
+int ps4_gow3gpu_notify(const char *text, int milliseconds) {
+  return g_notify ? g_notify(text, milliseconds) : 0;
+}
 
 int ps4_gow3gpu_overlay_captures_input(void) {
   return g_captures_input ? g_captures_input() : 0;
@@ -141,6 +147,7 @@ int ps4_gow3gpu_start_requested_backend(GuestContext *ctx) {
   g_choice_poll = (ChoicePollFn)dlsym(g_candidate_library, "gow3gpu_choice_poll");
   g_captures_input =
       (CapturesInputFn)dlsym(g_candidate_library, "gow3gpu_overlay_captures_input");
+  g_notify = (NotifyFn)dlsym(g_candidate_library, "gow3gpu_notify");
 
   if (ps4_gow3gpu_install_runtime_apis(ctx, set_memory_api, set_host_api,
                                        handle_fault) != 0) {

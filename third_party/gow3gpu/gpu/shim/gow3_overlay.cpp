@@ -80,6 +80,9 @@ int requested_tab = -1; // switch on the next frame (L1/R1, Q/E, menu opened)
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
 bool text_entry_active = false;
 std::string text_entry_prompt, text_entry_text;
+// A short notice (quick save) shown at the top of the screen until notice_until.
+std::string notice_text;
+std::chrono::steady_clock::time_point notice_until{};
 // The game's save list (sceSaveDataDialog): a choice made with the arrows/D-pad.
 std::atomic<bool> choice_active{false};
 std::string choice_title;
@@ -695,6 +698,20 @@ void TextEntryBox() {
     ImGui::End();
 }
 
+void NoticeBox() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.06f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::Begin("##notice", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.55f, 1.0f), "%s", notice_text.c_str());
+    ImGui::End();
+}
+
 void ChoiceBox() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
@@ -1100,6 +1117,7 @@ bool Visible() {
     const auto& s = Gow3Settings::Get();
     return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
                            choice_retiring || s.show_fps ||
+                           std::chrono::steady_clock::now() < notice_until ||
                            (s.actor_watch_supported && s.enemy_health_bar));
 }
 
@@ -1122,6 +1140,12 @@ void BeginChoice(const std::string& title, const std::vector<std::string>& items
 
 int PollChoice() {
     return choice_result;
+}
+
+void Notify(const std::string& text, int milliseconds) {
+    std::scoped_lock lock{imgui_mutex};
+    notice_text = text;
+    notice_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
@@ -1179,6 +1203,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (choice_active && !menu_open) {
         ChoiceBox();
+    }
+    if (!menu_open && std::chrono::steady_clock::now() < notice_until) {
+        NoticeBox();
     }
     ImGui::Render();
 

@@ -683,6 +683,12 @@ extern "C" int gow3gpu_choice_poll(void) {
     return Gow3Overlay::PollChoice();
 }
 
+extern "C" int gow3gpu_notify(const char* text, int milliseconds) {
+    if (!GetWindow() || !text) return 0;
+    Gow3Overlay::Notify(text, milliseconds > 0 ? milliseconds : 3000);
+    return 1;
+}
+
 extern "C" int gow3gpu_text_input_poll(char* out, uint64_t size) {
     auto* window = GetWindow();
     if (!window) return 2;

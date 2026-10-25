@@ -866,7 +866,18 @@ def main() -> int:
     runtime_env["PS4_SCREENSHOT_DIR"] = str(run_dir / "frames")
     runtime_env["PS4_SCREENSHOT_EVERY"] = str(max(1, args.screenshot_every))
     runtime_env["PS4_GPU_CAPTURE_DIR"] = str(run_dir / "gpu-captures")
-    candidate_backend = runtime_env.get("PS4_GOW3GPU_BACKEND") == "gow3gpu-vulkan"
+    # Lab runs never touch the player's saves (~/Library/Application Support/PS4Recomp/saves):
+    # the auto-pressed New Game writes AUTOSAVE, so every run gets its own empty save folder.
+    # GOW3_LAB_SAVEDATA_DIR picks another throwaway folder (e.g. a copy of a save to load).
+    lab_saves = Path(os.environ.get("GOW3_LAB_SAVEDATA_DIR", str(run_dir / "savedata"))).expanduser()
+    user_saves = (Path.home() / "Library/Application Support/PS4Recomp/saves").resolve()
+    if lab_saves.resolve() == user_saves or user_saves in lab_saves.resolve().parents:
+        print(f"RUNTIME: BLOCKED (save folder {lab_saves} is the player's save folder)")
+        return 5
+    lab_saves.mkdir(parents=True, exist_ok=True)
+    runtime_env["PS4_SAVEDATA_DIR"] = str(lab_saves)
+    runtime_env.pop("PS4RECOMP_DATA_DIR", None)
+    candidate_backend =runtime_env.get("PS4_GOW3GPU_BACKEND") == "gow3gpu-vulkan"
     if candidate_backend:
         candidate_user_dir = Path(runtime_env.get(
             "PS4_GOW3GPU_USER_DIR",

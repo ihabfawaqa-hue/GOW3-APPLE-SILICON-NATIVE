@@ -107,3 +107,23 @@ fault rate and top sites (`GOW3_TSO_SITES=<file>` dumps all); add new hot sites 
 Default since a later commit: every check stays (`GOW3_GUEST_TSO_CHECKS=0` when generating
 build.ninja drops them as described); the other peephole rewrites stay on. The runtime fault path and
 log remain and do nothing without rewritten accesses.
+
+## Update (night): draw preparation, worker assertion, runtime 20261025-233314-8d14ec0
+
+The old "prepared pipelines used" counter was wrong (counted ~100%); counted by outcome, 10-33% of
+draws used a prepared pipeline, most of the rest had no slot because the scanner (utility priority)
+fell behind. The scanner now runs at user-initiated and slots apply part-way through a buffer: in an
+idle-machine run 98% of draws used a prepared pipeline (13 rebases) — with no frame-rate gain, so
+pipeline selection on the GPU thread is not the limit.
+
+A latent worker race: workers compute pipeline keys from registers rebuilt from scanned buffers and
+could hit the SurfaceFormat assertion on a bogus vertex descriptor. Late on 2026-10-25 it ended runs
+within ~3 minutes with the previously installed library too (2 of 2). Workers now give such a draw
+up; 0 assertions in 7 runs with the new library. Installed for that reason
+(rollback: point `runtime/current` at 20261025-163519-d72d3b7).
+
+Library A/B on an idle machine (834-draw view): new 32.8 FPS (20 windows); old 37.0 and 33.9
+(7-8 windows before the assertion). One new-library run crashed inside the Metal driver recording
+a compute barrier (the intermittent driver-crash family, also seen with the old library at 0x428).
+Machine load matters: with Gemini and assistant_service busy (load average 86) the same build lost
+~25% FPS.

@@ -220,10 +220,12 @@ def render(root: Path) -> str:
     rule_for = {".c": "compile_c", ".s": "compile_s", ".m": "compile_m",
                 ".mm": "compile_mm", ".cpp": "compile_cpp"}
     # Recompiled guest code goes through exact peephole rewrites (tools/peephole_guest_code.py)
-    # before it is assembled; GOW3_GUEST_PEEPHOLE=0 when generating assembles it unchanged, and
-    # GOW3_GUEST_TSO_CHECKS=1 keeps the inline 16-byte-crossing check of every guest access.
+    # before it is assembled; GOW3_GUEST_PEEPHOLE=0 when generating assembles it unchanged. Every
+    # guest access keeps its inline 16-byte-crossing check; GOW3_GUEST_TSO_CHECKS=0 drops it
+    # outside the functions in tools/tso_crossing_sites.txt: +2-3 FPS on the profiled Mount Olympus
+    # save, but a crossing in a stage not yet profiled costs a ~2 us fault (up to 200,000/s seen).
     peephole = os.environ.get("GOW3_GUEST_PEEPHOLE", "1") != "0"
-    keep_checks = os.environ.get("GOW3_GUEST_TSO_CHECKS", "0") == "1"
+    keep_checks = os.environ.get("GOW3_GUEST_TSO_CHECKS", "1") != "0"
     lines.append(f"peephole_flags = {'--keep-tso-checks' if keep_checks else ''}")
     for source in app_sources:
         if peephole and re.fullmatch(r"code_\d+\.s", source.as_posix()):

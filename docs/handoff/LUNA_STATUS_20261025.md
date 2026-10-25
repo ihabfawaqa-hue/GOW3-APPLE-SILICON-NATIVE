@@ -104,4 +104,6 @@ like-for-like gain.) Risk: a stage not yet profiled can fault often (the first b
 until its sites are added. The GPU-library faults seen in two runs (host 0x20000, 0x428) also occur
 with all checks and before this change. The runtime logs `[tso]` lines with the
 fault rate and top sites (`GOW3_TSO_SITES=<file>` dumps all); add new hot sites to the list.
-`GOW3_GUEST_TSO_CHECKS=1 python3 tools/generate_build_ninja.py ...` restores every check.
+Default since a later commit: every check stays (`GOW3_GUEST_TSO_CHECKS=0` when generating
+build.ninja drops them as described); the other peephole rewrites stay on. The runtime fault path and
+log remain and do nothing without rewritten accesses.

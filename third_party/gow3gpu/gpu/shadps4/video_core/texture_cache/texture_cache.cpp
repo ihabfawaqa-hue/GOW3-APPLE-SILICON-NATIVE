@@ -21,6 +21,7 @@
 #include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
@@ -248,12 +249,22 @@ void TextureCache::ProcessDownloadImages() {
     if (pending.empty()) {
         return;
     }
+    const auto start = std::chrono::steady_clock::now();
     scheduler.Finish();
+    u64 bytes = 0;
     for (const PendingDownload& download : pending) {
         download.staging.Invalidate();
         Core::Memory::Instance()->TryWriteBacking(download.guest_address,
                                                   download.staging.mapped, download.size);
         runtime.GetStagingPool().FreeDeferred(download.staging);
+        bytes += download.size;
+    }
+    if (TextureOrderDiag()) {
+        std::printf("Texture order: synchronous readback of %zu image(s), %.1f MiB, %.2f ms "
+                    "(GPU drained)\n",
+                    pending.size(), bytes / 1048576.0,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                        .count());
     }
 }
 
@@ -527,7 +538,20 @@ void TextureCache::ApplyBackingWrites() {
         ForEachImageInRegion(address, size, [&](ImageId image_id, Image& image) {
             // Images sharing memory with a GPU writer are synchronized by SynchronizeAlias.
             if (True(image.flags & (ImageFlagBits::GpuModified | ImageFlagBits::Aliased))) {
+                if (TextureOrderDiag() && image.info.props.is_block && order_logged < 80) {
+                    ++order_logged;
+                    std::printf("Texture order: backing write %#llx+%#llx skips %#llx+%#llx %s (%s)\n",
+                                static_cast<unsigned long long>(address),
+                                static_cast<unsigned long long>(size),
+                                static_cast<unsigned long long>(image.info.guest_address),
+                                static_cast<unsigned long long>(image.info.guest_size),
+                                vk::to_string(image.info.pixel_format).c_str(),
+                                True(image.flags & ImageFlagBits::Aliased) ? "aliased" : "GPU modified");
+                }
                 return;
+            }
+            if (TextureOrderDiag() && image.info.props.is_block) {
+                ++order_reuploads;
             }
             image.flags |= ImageFlagBits::CpuDirty;
             UntrackImage(image_id);
@@ -649,9 +673,19 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
     // Only linear images: the download writes rows, so a tiled target (render targets the
     // game reuses the memory of) would land untiled in guest memory and read back scrambled.
     const auto publish_gpu_data = [&] {
-        if (False(cache_image.flags & ImageFlagBits::GpuModified) ||
-            cache_image.info.props.is_tiled) {
+        if (False(cache_image.flags & ImageFlagBits::GpuModified)) {
             return false;
+        }
+        if (cache_image.info.props.is_tiled) {
+            // The new image uploads what guest memory holds; the tiled GPU data stays on the host.
+            if (TextureOrderDiag()) NotePublication(cache_image, image_info, "NOT published (tiled)");
+            return false;
+        }
+        if (TextureOrderDiag()) {
+            NotePublication(cache_image, image_info,
+                            image_info.guest_address == cache_image.info.guest_address ? "equal address"
+                            : image_info.guest_address > cache_image.info.guest_address ? "inside"
+                                                                                       : "around");
         }
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(cache_image_id);
@@ -1075,6 +1109,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
+        image.gpu_write_tick = scheduler.CurrentTick();
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
@@ -1086,6 +1121,8 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
     }
     if (desc.type == BindingType::Storage) {
         PublishAliasWrite(image_id);
+    } else if (image.info.props.is_block && TextureOrderDiag()) {
+        NoteTextureOrder(image_id);
     }
     if (memo && !Gow3Toggle::Disabled(Gow3Toggle::TextureViewMemo)) {
         if (memo->image_id == image_id && memo->backing == image.backing && memo->view_id) {
@@ -1106,6 +1143,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
+    image.gpu_write_tick = scheduler.CurrentTick();
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
@@ -1259,6 +1297,76 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    image.upload_tick = scheduler.CurrentTick();
+}
+
+bool TextureCache::TextureOrderDiag() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_TEXTURE_ORDER_DIAG");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+void TextureCache::NotePublication(const Image& cache_image, const ImageInfo& requested,
+                                   const char* kind) {
+    ++order_publications;
+    if (order_logged < 40) {
+        ++order_logged;
+        std::printf("Texture order: publish %#llx+%#llx %s (written tick %llu) for a new %#llx+%#llx "
+                    "%s, %s\n",
+                    static_cast<unsigned long long>(cache_image.info.guest_address),
+                    static_cast<unsigned long long>(cache_image.info.guest_size),
+                    vk::to_string(cache_image.info.pixel_format).c_str(),
+                    static_cast<unsigned long long>(cache_image.gpu_write_tick),
+                    static_cast<unsigned long long>(requested.guest_address),
+                    static_cast<unsigned long long>(requested.guest_size),
+                    vk::to_string(requested.pixel_format).c_str(), kind);
+    }
+}
+
+void TextureCache::NoteTextureOrder(ImageId image_id) {
+    std::scoped_lock lock{mutex};
+    Image& image = slot_images[image_id];
+    ForEachImageInRegion(image.info.guest_address, image.info.guest_size,
+                         [&](ImageId other_id, Image& other) {
+        if (other_id == image_id || False(other.flags & ImageFlagBits::GpuModified) ||
+            other.gpu_write_tick <= image.upload_tick || CanAlias(other, image)) {
+            return;
+        }
+        ++order_stale_binds;
+        if (order_logged < 40) {
+            ++order_logged;
+            bool queued;
+            {
+                std::unique_lock lk{download_images_mutex};
+                queued = download_images.contains(other_id);
+            }
+            std::printf("Texture order: stale bind %#llx+%#llx %s (uploaded tick %llu) under "
+                        "%#llx+%#llx %s%s (written tick %llu, now %llu, readback %s)\n",
+                        static_cast<unsigned long long>(image.info.guest_address),
+                        static_cast<unsigned long long>(image.info.guest_size),
+                        vk::to_string(image.info.pixel_format).c_str(),
+                        static_cast<unsigned long long>(image.upload_tick),
+                        static_cast<unsigned long long>(other.info.guest_address),
+                        static_cast<unsigned long long>(other.info.guest_size),
+                        vk::to_string(other.info.pixel_format).c_str(),
+                        other.info.props.is_tiled ? " tiled" : " linear",
+                        static_cast<unsigned long long>(other.gpu_write_tick),
+                        static_cast<unsigned long long>(scheduler.CurrentTick()),
+                        queued ? "queued" : "not queued");
+        }
+    });
+    const auto now = std::chrono::steady_clock::now();
+    if (now - order_report >= std::chrono::seconds(5)) {
+        std::printf("Texture order: %llu stale BC binds, %llu publications, %llu BC textures "
+                    "marked for re-upload by backing writes in the last 5 s\n",
+                    static_cast<unsigned long long>(order_stale_binds),
+                    static_cast<unsigned long long>(order_publications),
+                    static_cast<unsigned long long>(order_reuploads));
+        order_stale_binds = order_publications = order_reuploads = 0;
+        order_report = now;
+    }
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
@@ -1616,6 +1724,10 @@ void TextureCache::TouchImage(const Image& image) {
 void TextureCache::DeleteImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     CancelReadbacks(image.info.guest_address, image.info.guest_size);
+    // Reduced-size proxies of the image (scene scaling) go with it; they leaked before.
+    if (image.scene_proxy && runtime.scene_targets) {
+        runtime.scene_targets->Forget(image.image_uid);
+    }
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
 

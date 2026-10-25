@@ -137,6 +137,38 @@ bool SceneTargets::SetSize(SceneResolution::Size next) {
                 "(live)\n", size.width, size.height, size.width / 2, size.height / 2);
     return true;
 }
+void SceneTargets::Forget(u64 image_uid) {
+    std::scoped_lock lock{forgotten_mutex};
+    forgotten.push_back(image_uid);
+    has_forgotten.store(true, std::memory_order_release);
+}
+void SceneTargets::DropForgotten() {
+    if (!has_forgotten.load(std::memory_order_acquire)) return;
+    std::vector<u64> uids;
+    {
+        std::scoped_lock lock{forgotten_mutex};
+        uids.swap(forgotten);
+        has_forgotten.store(false, std::memory_order_release);
+    }
+    bool dropped = false;
+    for (const u64 uid : uids) {
+        if (!tracked.erase(uid)) continue;
+        for (u32 level = 0; level < 16; ++level) {
+            const auto it = entries.find(Key(uid, level));
+            if (it == entries.end()) continue;
+            for (auto& [recent_key, recent_entry] : recent) {
+                if (recent_entry == it->second.get()) recent_key = 0, recent_entry = nullptr;
+            }
+            // Commands recorded until now may still use the proxy: destroy it after them.
+            scheduler.DeferOperation([entry = std::move(it->second)]() mutable { entry.reset(); });
+            entries.erase(it);
+            ++dropped_proxies;
+            dropped = true;
+        }
+    }
+    // Views of dropped proxies cached by the rasterizer are rebuilt.
+    if (dropped) ++generation;
+}
 void SceneTargets::ResolveAll() {
     for (auto& [key, entry] : entries) {
         if (entry->state.dirty) {
@@ -146,6 +178,7 @@ void SceneTargets::ResolveAll() {
 }
 void SceneTargets::NativeAccess(VideoCore::Image& image, vk::AccessFlags2 access) {
     if (copying || !image.scene_proxy) return; // most images never had a proxy
+    DropForgotten();
     constexpr auto writes = vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite |
         vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
         vk::AccessFlagBits2::eMemoryWrite;
@@ -436,6 +469,7 @@ vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil, vk:
     return result;
 }
 SceneTargets::Entry& SceneTargets::Get(VideoCore::ImageId id, u32 level) {
+    DropForgotten();
     auto& original = *lookup(id, 0);
     const u64 key = Key(original.image_uid, level);
     // A draw has up to six targets, mostly the same as the previous draw's.
@@ -522,6 +556,7 @@ vk::ImageLayout SceneTargets::PrepareSample(const VideoCore::Image& image, u32 l
 std::optional<SceneTargets::Target> SceneTargets::SampleProxy(
     const VideoCore::Image& image, const VideoCore::ImageViewInfo& info) {
     const u32 level = info.range.base.level;
+    DropForgotten();
     if (!ProxyCurrent(image, level, info.range.extent.levels)) {
         return std::nullopt;
     }

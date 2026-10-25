@@ -464,6 +464,14 @@ private:
     }();
     template <bool track>
     void WatchReadback(VAddr address, u64 size);
+    /// gow3: GOW3_TEXTURE_ORDER_DIAG=1 reports block-compressed textures sampled while an
+    /// overlapping image (not an alias) has a GPU write newer than their last upload, and the
+    /// overlaps that queue GPU data for guest memory. Diagnostic only.
+    static bool TextureOrderDiag();
+    void NoteTextureOrder(ImageId image_id);
+    void NotePublication(const Image& cache_image, const ImageInfo& requested, const char* kind);
+    u64 order_stale_binds = 0, order_publications = 0, order_reuploads = 0, order_logged = 0;
+    std::chrono::steady_clock::time_point order_report{};
     struct ReadbackImageStat {
         VAddr address;
         u32 width, height, bits, copies, cpu_accesses;

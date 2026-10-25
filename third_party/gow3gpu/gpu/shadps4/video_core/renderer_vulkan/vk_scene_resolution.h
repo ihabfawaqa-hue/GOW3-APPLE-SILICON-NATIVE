@@ -4,7 +4,10 @@
 #include <tuple>
 #include <memory>
 #include <optional>
+#include <atomic>
 #include <functional>
+#include <mutex>
+#include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include "video_core/renderer_vulkan/scene_resolution.h"
@@ -65,6 +68,10 @@ public:
         return !copying && tracked.contains(image_uid);
     }
     void ResolveAll();
+    /// Any thread (the texture cache also deletes images on guest threads): the native image
+    /// is gone. Its proxies are dropped at the next use of SceneTargets on the GPU thread and
+    /// destroyed once the GPU has finished the work recorded until then.
+    void Forget(u64 image_uid);
     bool debug = false; ///< GOW3_SCENE_DEBUG frame: print resolves and fills
 private:
     struct Entry {
@@ -100,6 +107,11 @@ private:
     SceneResolution::Size size;
     std::unordered_map<u64, std::unique_ptr<Entry>> entries; ///< by Key(uid, level)
     std::unordered_set<u64> tracked; ///< uids with proxies
+    void DropForgotten();
+    std::mutex forgotten_mutex;
+    std::vector<u64> forgotten; ///< uids of deleted native images (Forget)
+    std::atomic<bool> has_forgotten{false};
+    u64 dropped_proxies = 0;
     bool copying = false;
     bool multisample_scaling = false; ///< diagnostic opt-in, preserves per-sample content
     bool force_stencil_bits = false; ///< test the portable resampler on any driver

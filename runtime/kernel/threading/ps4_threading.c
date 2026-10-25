@@ -176,11 +176,12 @@ static void recomp_thread_epilogue(RecompThread *t, GuestContext *ctx) {
 #include <pthread/qos.h>
 // PS4_GUEST_WORKER_QOS=<default|utility|initiated|interactive>: QoS class of the game's job
 // workers (guest threads named "NdJobWorkerThread*"), set when the thread starts. Unset means
-// "initiated": above other apps' default-class work, which otherwise takes the cores from the
-// workers while a frame waits for a job, and below the CP, encoder and audio threads
-// (USER_INTERACTIVE). "default" leaves the class the thread got at creation (QOS_CLASS_DEFAULT).
-// Idle workers spin instead of sleeping, so "interactive" puts six spinning threads next to the
-// CP and encoder threads; it exists for experiments only.
+// "interactive" (USER_INTERACTIVE, as the main thread and the GPU threads): God of War III's
+// main thread waits for its workers' jobs every frame, and at "initiated" they ran on the
+// efficiency cores while it waited (23% of the main thread; 9-13% at "interactive", loaded
+// Mount Olympus save 38.6 -> 40.2 FPS, combat unchanged). Idle workers spin instead of
+// sleeping; an earlier build starved its GPU threads this way, the current one does not.
+// "default" leaves the class the thread got at creation (QOS_CLASS_DEFAULT).
 static void guest_worker_apply_qos(const char *name) {
   // Job workers: Naughty Dog's engine ("NdJobWorkerThread*") and God of War III ("WorkerThread*",
   // whose main thread spins until their jobs finish).
@@ -189,7 +190,7 @@ static void guest_worker_apply_qos(const char *name) {
   if (strncmp(name, kPrefix, sizeof kPrefix - 1) != 0 &&
       strncmp(name, kGow3Prefix, sizeof kGow3Prefix - 1) != 0) return;
   const char *e = getenv("PS4_GUEST_WORKER_QOS");
-  if (!e || !e[0]) e = "initiated";
+  if (!e || !e[0]) e = "interactive";
   if (strcmp(e, "default") == 0) return;
   qos_class_t cls;
   if (strcmp(e, "utility") == 0) cls = QOS_CLASS_UTILITY;

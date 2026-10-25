@@ -160,6 +160,7 @@ public:
 
 private:
     u32 current_draw = 0;
+    bool current_scanned = false; ///< `current` was scanned at BeginSubmission: its slots exist
     u64 used = 0, unused = 0;
     u32 worker_count = 0; ///< fixed before the worker threads start
     std::jthread scanner;

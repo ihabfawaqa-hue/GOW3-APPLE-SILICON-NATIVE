@@ -226,12 +226,11 @@ std::shared_ptr<DrawPreparation::Submission> DrawPreparation::Build(
     if (!Enabled()) {
         return {};
     }
+    // gow3: this runs on the game's thread inside sceGnmSubmitCommandBuffers: only the copy is
+    // made here. Counting the draws and allocating their slots (~6% of the game's main thread)
+    // moved to the scanner, which walks the packets anyway.
     auto submission = std::make_shared<Submission>();
     submission->commands.assign(commands.begin(), commands.end());
-    ForEachPacket(submission->commands, [&](const AmdGpu::PM4Header* header) {
-        submission->num_draws += IsDirectDraw(header->type3.opcode);
-    });
-    submission->draws = std::make_unique<PreparedDraw[]>(submission->num_draws);
     return submission;
 }
 
@@ -250,6 +249,7 @@ void DrawPreparation::Enqueue(u64 seq, std::shared_ptr<Submission> submission) {
 void DrawPreparation::BeginSubmission(u64 seq, const AmdGpu::Regs& regs, u64 reg_checksum) {
     current_draw = 0;
     current.reset();
+    current_scanned = false;
     if (!Enabled()) {
         return;
     }
@@ -280,6 +280,8 @@ void DrawPreparation::BeginSubmission(u64 seq, const AmdGpu::Regs& regs, u64 reg
     if (!submissions.empty() && seq >= submissions.front()->seq &&
         seq - submissions.front()->seq < submissions.size()) {
         current = submissions[seq - submissions.front()->seq];
+        // Not scanned yet: its draw slots do not exist; the GPU thread prepares every draw itself.
+        current_scanned = current->scanned.load(std::memory_order_acquire);
     }
 }
 
@@ -294,7 +296,7 @@ void DrawPreparation::EndSubmission() {
 }
 
 const PreparedDraw* DrawPreparation::NextDraw() {
-    if (!current || current_draw >= current->num_draws) {
+    if (!current || !current_scanned || current_draw >= current->num_draws) {
         return nullptr;
     }
     const PreparedDraw* draw = &current->draws[current_draw++];
@@ -364,9 +366,14 @@ void DrawPreparation::ScannerLoop(std::stop_token stop) {
         }
         submission->start_checksum = checksum;
         dirty.Clear();
+        u32 num_draws = 0;
         ForEachPacket(submission->commands, [&](const AmdGpu::PM4Header* header) {
             AmdGpu::Liverpool::ApplyGraphicsRegisterPacket(*regs, header, checksum, &dirty);
+            num_draws += IsDirectDraw(header->type3.opcode);
         });
+        // Published with `scanned`: the GPU thread uses the slots only of a scanned buffer.
+        submission->draws = std::make_unique<PreparedDraw[]>(num_draws);
+        submission->num_draws = num_draws;
         submission->delta.Capture(*regs, dirty);
         submission->end_checksum = checksum;
         {

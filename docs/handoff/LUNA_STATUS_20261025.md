@@ -97,8 +97,11 @@ Fault path verified on the host (416 cases: all access kinds, both scratch regis
 2.2 µs each) and in one loaded-save run (no FATAL). That run had ~200,000 crossings/s in gameplay
 (36 FPS, droppier): the game writes 8-byte values at 4-byte alignment in command-buffer builders.
 The 578 sites seen are in `tools/tso_crossing_sites.txt`; every access of the 182 functions holding
-them keeps its check. With 426 sites: 50.2 FPS on the loaded save (was ~41), ~4,000 faults/s; with
-578: under 10 faults/s (one run ended in the known intermittent GPU-library fault at host 0x20000,
-also seen at 03:45 and 09:36 before this change). The runtime logs `[tso]` lines with the
+them keeps its check. With 578 sites: under 10 faults/s. A/B at the same 834-draw view, alternating
+builds: all checks 38.7 FPS (8 windows) and 35.6 (1); without 41.4 and 39.1 (20 windows each), about
++2-3 FPS with no faults in that scene. (An earlier "50 FPS" run was a lighter ~750-draw view, not a
+like-for-like gain.) Risk: a stage not yet profiled can fault often (the first build hit 200,000/s)
+until its sites are added. The GPU-library faults seen in two runs (host 0x20000, 0x428) also occur
+with all checks and before this change. The runtime logs `[tso]` lines with the
 fault rate and top sites (`GOW3_TSO_SITES=<file>` dumps all); add new hot sites to the list.
 `GOW3_GUEST_TSO_CHECKS=1 python3 tools/generate_build_ninja.py ...` restores every check.

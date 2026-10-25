@@ -140,6 +140,11 @@ def parse_audioout_log(text: str) -> dict[str, object]:
         r"\[AudioOut\] host: running=(\d+) render_calls=(\d+) render_frames=(\d+) "
         r"mix_rms=([\d.eE+-]+) mix_peak=([\d.eE+-]+) dump_frames=(\d+)"
     )
+    pacing_re = re.compile(
+        r"\[AudioOut\] pacing port (\d+): intervals=(\d+) avg_ms=([\d.eE+-]+) "
+        r"max_ms=([\d.eE+-]+) planned_wait_avg_ms=([\d.eE+-]+) queue_min=(\d+) "
+        r"adjust_us=([\-\d.eE+]+) resets=(\d+)"
+    )
     ports = []
     for match in port_re.finditer(text):
         g = match.groups()
@@ -159,11 +164,22 @@ def parse_audioout_log(text: str) -> dict[str, object]:
             "render_frames": int(g[2]), "mix_rms": float(g[3]),
             "mix_peak": float(g[4]), "dump_frames": int(g[5]),
         })
+    pacing = []
+    for match in pacing_re.finditer(text):
+        g = match.groups()
+        pacing.append({
+            "port": int(g[0]), "intervals": int(g[1]), "average_interval_ms": float(g[2]),
+            "maximum_interval_ms": float(g[3]), "planned_wait_average_ms": float(g[4]),
+            "minimum_queue_frames": int(g[5]), "adjustment_us": float(g[6]),
+            "clock_resets": int(g[7]),
+        })
     return {
         "port_observation_count": len(ports),
         "latest_port_observations": ports[-25:],
         "host_observation_count": len(hosts),
         "latest_host_observation": hosts[-1] if hosts else None,
+        "pacing_observation_count": len(pacing),
+        "latest_pacing_observations": pacing[-25:],
         "audioout_open_lines": [line for line in text.splitlines() if "[AudioOut] open:" in line][-25:],
         "host_output_start_seen": "host output started" in text,
         "host_output_suppression_seen": any(
@@ -187,20 +203,33 @@ def parse_ajm_decode_log(text: str) -> dict[str, object]:
         if not match:
             continue
         g = match.groups()
+        result_bits = int(g[9], 16)
         records.append({
             "instance": g[0], "codec": int(g[1]), "format": int(g[2]),
             "channels": int(g[3]), "run_flags": int(g[4]),
             "input_bytes": int(g[5]), "input_used": int(g[6]),
             "output_bytes": int(g[7]), "frames": int(g[8]),
-            "result": g[9], "internal_result": int(g[10]),
+            "result": g[9], "result_bits": result_bits, "internal_result": int(g[10]),
             "pcm_nonzero_samples": int(g[11]), "pcm_rms": float(g[12]),
             "pcm_peak": float(g[13]),
         })
+    # Match AJM's decoder_error classification in ps4_ajm.c. In particular,
+    # NOT_ENOUGH_ROOM (0x10) is a flow-control result, not a codec failure.
+    decoder_error_mask = 0x80000000 | 0x40000000 | 0x00000007
     return {
         "decode_log_lines": len(lines),
         "parsed_decode_records": len(records),
         "latest_decode_record": records[-1] if records else None,
         "decoded_jobs_with_pcm_bytes": sum(record["output_bytes"] > 0 for record in records),
         "decoded_jobs_with_nonzero_pcm": sum(record["pcm_nonzero_samples"] > 0 for record in records),
-        "decode_jobs_with_error_result": sum(record["result"] != "0x0" for record in records),
+        "decode_jobs_with_any_nonzero_result": sum(record["result_bits"] != 0 for record in records),
+        "decode_jobs_with_error_result": sum(
+            bool(record["result_bits"] & decoder_error_mask) for record in records
+        ),
+        "decode_jobs_with_not_enough_room_result": sum(
+            bool(record["result_bits"] & 0x00000010) for record in records
+        ),
+        "decode_jobs_with_partial_input_result": sum(
+            bool(record["result_bits"] & 0x00000008) for record in records
+        ),
     }

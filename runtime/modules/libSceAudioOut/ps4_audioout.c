@@ -5,9 +5,9 @@
 // ring buffer. A single host output (AudioToolbox default-output AudioUnit,
 // float32 stereo @ 48 kHz; CoreAudio converts to the device format/rate) pulls
 // from every ring buffer and mixes them in its render callback.
-// sceAudioOutOutput/sceAudioOutOutputs block until the ring has room for the
-// next grain, so the guest's audio thread is paced by the real device clock
-// (like the PS4, where an output call blocks until the previous grain played).
+// sceAudioOutOutput/sceAudioOutOutputs queue one grain and then follow a
+// steady per-port clock. Ring room is still bounded by the host device, but
+// callback timing alone must not let guest output calls return in bursts.
 //
 // Port parameter / format / volume ABI details follow shadPS4's
 // src/core/libraries/audio/audioout.{h,cpp} (Copyright 2024-2026 shadPS4
@@ -48,6 +48,7 @@
 #define MAX_AUDIO_PORTS 25
 #define AUDIO_RATE 48000
 #define VOLUME_0DB 32768
+#define AUDIO_PACE_WINDOW_CALLS 32
 
 // Error codes: see ps4_audioout_internal.h.
 #define ORBIS_AUDIO_OUT_ERROR_NOT_OPENED PS4_AUDIO_OUT_ERROR_NOT_OPENED
@@ -90,7 +91,18 @@ typedef struct {
   uint32_t ring_fill;
   uint32_t ring_limit; // writers block while fill + length > limit
 
-  uint64_t next_sync_time_us; // fallback pacing when no host device
+  uint64_t next_sync_time_ns;
+  int64_t pace_adjust_ns;
+  uint32_t pace_window_calls;
+  uint32_t pace_window_min_fill;
+  uint32_t pace_last_window_min_fill;
+  uint64_t pace_last_call_ns;
+  uint64_t pace_interval_samples;
+  uint64_t pace_interval_sum_ns;
+  uint64_t pace_max_interval_ns;
+  uint64_t pace_wait_samples;
+  uint64_t pace_wait_sum_ns;
+  uint64_t pace_clock_resets;
   uint64_t outputs;
   uint64_t underruns;
   // stats (guest input after volume, before mixing)
@@ -128,20 +140,23 @@ static uint64_t g_dump_frames_hdr = 0;
 static AudioComponentInstance g_unit = NULL;
 #endif
 
-static uint64_t get_time_micros(void) {
+static uint64_t get_time_nanos(void) {
 #ifdef __APPLE__
   static mach_timebase_info_data_t timebase;
   if (timebase.denom == 0) {
     mach_timebase_info(&timebase);
   }
   uint64_t t = mach_absolute_time();
-  return (t * timebase.numer) / (timebase.denom * 1000ULL);
+  return (t / timebase.denom) * timebase.numer +
+         ((t % timebase.denom) * timebase.numer) / timebase.denom;
 #else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
+
+static uint64_t get_time_micros(void) { return get_time_nanos() / 1000ULL; }
 
 static bool audio_log_enabled(void) {
   if (g_log < 0) {
@@ -241,6 +256,26 @@ static void audio_stats_maybe_log(void) {
             (unsigned long long)p->stat_nonzero_bufs, rms, p->stat_peak, p->vol[0], p->vol[1],
             p->vol[2], p->vol[3], p->vol[4], p->vol[5], p->vol[6], p->vol[7], p->ring_fill,
             p->ring_cap, (unsigned long long)p->underruns);
+    if (p->pace_interval_samples) {
+      fprintf(stderr,
+              "[AudioOut] pacing port %d: intervals=%llu avg_ms=%.3f max_ms=%.3f "
+              "planned_wait_avg_ms=%.3f queue_min=%u adjust_us=%.1f resets=%llu\n",
+              i, (unsigned long long)p->pace_interval_samples,
+              (double)p->pace_interval_sum_ns / (double)p->pace_interval_samples / 1e6,
+              (double)p->pace_max_interval_ns / 1e6,
+              p->pace_wait_samples
+                  ? (double)p->pace_wait_sum_ns / (double)p->pace_wait_samples / 1e6
+                  : 0.0,
+              p->pace_last_window_min_fill,
+              (double)p->pace_adjust_ns / 1000.0,
+              (unsigned long long)p->pace_clock_resets);
+      p->pace_interval_samples = 0;
+      p->pace_interval_sum_ns = 0;
+      p->pace_max_interval_ns = 0;
+      p->pace_wait_samples = 0;
+      p->pace_wait_sum_ns = 0;
+      p->pace_clock_resets = 0;
+    }
     if (p->channels == 8 && p->stat_frames) {
       double n = (double)p->stat_frames;
       fprintf(stderr,
@@ -538,17 +573,72 @@ static void timespec_after_us(struct timespec *ts, uint64_t us) {
   ts->tv_nsec = (long)(ns % 1000000000ULL);
 }
 
-// Fallback pacing when no host device is running. Called without the lock.
-static void audio_port_pace_time(uint32_t length, uint64_t *next_sync) {
-  uint64_t frame_dur_us = ((uint64_t)length * 1000000ULL) / AUDIO_RATE;
-  uint64_t now = get_time_micros();
-  if (*next_sync == 0 || *next_sync < now) {
-    *next_sync = now + frame_dur_us;
-  } else {
-    uint64_t diff = *next_sync - now;
-    if (diff > 50000) diff = 50000;
-    usleep((useconds_t)diff);
-    *next_sync += frame_dur_us;
+// Prepare the next absolute output deadline. Called with g_audio_lock held;
+// sleeping is always done after releasing it. The ring's minimum fill over a
+// short window steers the producer by at most 1/32 of a grain per period.
+static uint64_t audio_port_prepare_deadline(Ps4AudioPort *p, bool host) {
+  const uint64_t period_ns = (uint64_t)p->length * 1000000000ULL / AUDIO_RATE;
+  const uint64_t now_ns = get_time_nanos();
+  if (p->pace_last_call_ns != 0) {
+    const uint64_t interval_ns = now_ns - p->pace_last_call_ns;
+    p->pace_interval_samples++;
+    p->pace_interval_sum_ns += interval_ns;
+    if (interval_ns > p->pace_max_interval_ns)
+      p->pace_max_interval_ns = interval_ns;
+  }
+  p->pace_last_call_ns = now_ns;
+
+  if (host && p->length != 0) {
+    if (p->pace_window_calls == 0 || p->ring_fill < p->pace_window_min_fill)
+      p->pace_window_min_fill = p->ring_fill;
+    if (++p->pace_window_calls == AUDIO_PACE_WINDOW_CALLS) {
+      const uint32_t low_fill = 2 * p->length;
+      const uint32_t high_fill = 4 * p->length;
+      p->pace_last_window_min_fill = p->pace_window_min_fill;
+      if (p->pace_window_min_fill < low_fill)
+        p->pace_adjust_ns = -(int64_t)(period_ns / AUDIO_PACE_WINDOW_CALLS);
+      else if (p->pace_window_min_fill > high_fill)
+        p->pace_adjust_ns = (int64_t)(period_ns / AUDIO_PACE_WINDOW_CALLS);
+      else
+        p->pace_adjust_ns = 0;
+      p->pace_window_calls = 0;
+    }
+  }
+
+  const bool clock_reset = p->next_sync_time_ns == 0 ||
+                           now_ns > p->next_sync_time_ns + period_ns * 8;
+  uint64_t deadline_ns = p->next_sync_time_ns;
+  if (clock_reset) {
+    if (p->next_sync_time_ns != 0)
+      p->pace_clock_resets++;
+    deadline_ns = now_ns;
+    p->pace_adjust_ns = 0;
+    p->pace_window_calls = 0;
+  }
+
+  int64_t step_ns = (int64_t)period_ns + p->pace_adjust_ns;
+  if (step_ns < (int64_t)(period_ns / 2))
+    step_ns = (int64_t)(period_ns / 2);
+  p->next_sync_time_ns = deadline_ns + (uint64_t)step_ns;
+  if (deadline_ns > now_ns) {
+    p->pace_wait_samples++;
+    p->pace_wait_sum_ns += deadline_ns - now_ns;
+  }
+  return deadline_ns;
+}
+
+static void audio_port_sleep_until(uint64_t deadline_ns) {
+  for (;;) {
+    const uint64_t now_ns = get_time_nanos();
+    if (now_ns >= deadline_ns)
+      return;
+    const uint64_t remaining_ns = deadline_ns - now_ns;
+    struct timespec remaining = {
+        .tv_sec = (time_t)(remaining_ns / 1000000000ULL),
+        .tv_nsec = (long)(remaining_ns % 1000000000ULL),
+    };
+    if (nanosleep(&remaining, &remaining) == 0 || errno != EINTR)
+      return;
   }
 }
 
@@ -698,16 +788,10 @@ int32_t ps4_audioout_port_output(int32_t handle, const void *pcm) {
   if (pcm) {
     audio_port_push(port, pcm);
   }
-  bool host = g_host_running;
+  uint64_t deadline = audio_port_prepare_deadline(port, g_host_running);
   audio_stats_maybe_log();
-  uint64_t next = port->next_sync_time_us;
   pthread_mutex_unlock(&g_audio_lock);
-  if (!host) {
-    audio_port_pace_time(len, &next);
-    pthread_mutex_lock(&g_audio_lock);
-    if (port->in_use && port->handle == handle) port->next_sync_time_us = next;
-    pthread_mutex_unlock(&g_audio_lock);
-  }
+  audio_port_sleep_until(deadline);
   return pcm ? (int32_t)len : 0;
 }
 
@@ -728,9 +812,8 @@ int32_t ps4_audioout_port_writable(int32_t handle) {
               : 0;
     }
   } else {
-    // Wall-time pacing: an output blocks while the previous grain's slot has
-    // not elapsed yet (see audio_port_pace_time).
-    n = (p->next_sync_time_us == 0 || p->next_sync_time_us <= get_time_micros()) ? 1 : 0;
+    // Wall-time pacing: an output blocks until its next steady-clock slot.
+    n = (p->next_sync_time_ns == 0 || p->next_sync_time_ns <= get_time_nanos()) ? 1 : 0;
   }
   pthread_mutex_unlock(&g_audio_lock);
   return n;
@@ -787,18 +870,13 @@ void shim_sceAudioOutOutputs(GuestContext *ctx) {
       audio_port_push(port, ctx->mem_base + pcm);
     }
   }
-  bool host = g_host_running;
-  audio_stats_maybe_log();
   int32_t h0 = *(int32_t *)(ctx->mem_base + param_addr);
   Ps4AudioPort *first = audio_port_get(h0);
-  uint64_t next = first ? first->next_sync_time_us : 0;
+  uint64_t deadline = first ? audio_port_prepare_deadline(first, g_host_running) : 0;
+  audio_stats_maybe_log();
   pthread_mutex_unlock(&g_audio_lock);
-  if (!host && first) {
-    audio_port_pace_time(len, &next);
-    pthread_mutex_lock(&g_audio_lock);
-    if (first->in_use && first->handle == h0) first->next_sync_time_us = next;
-    pthread_mutex_unlock(&g_audio_lock);
-  }
+  if (first)
+    audio_port_sleep_until(deadline);
   ctx->rax = (uint64_t)len;
   SHIM_RETURN();
 }

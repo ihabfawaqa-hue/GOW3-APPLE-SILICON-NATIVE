@@ -70,6 +70,17 @@ class AudioMetricsTests(unittest.TestCase):
         self.assertTrue(metrics["latest_host_observation"]["running"])
         self.assertEqual(metrics["latest_host_observation"]["render_frames"], 9600)
 
+    def test_audioout_pacing_logs_report_cadence_and_queue_steering(self):
+        logs = (
+            "[AudioOut] pacing port 1: intervals=376 avg_ms=5.333 max_ms=7.200 "
+            "planned_wait_avg_ms=4.500 queue_min=768 adjust_us=0.0 resets=1"
+        )
+        pacing = parse_audioout_log(logs)["latest_pacing_observations"][0]
+        self.assertEqual(pacing["intervals"], 376)
+        self.assertEqual(pacing["average_interval_ms"], 5.333)
+        self.assertEqual(pacing["minimum_queue_frames"], 768)
+        self.assertEqual(pacing["clock_resets"], 1)
+
     def test_ajm_decode_metrics_separate_decoder_output_from_host_audio(self):
         line = (
             "[AJM] decode: inst=16385 codec=1 fmt=2 ch=2 run=2 input_bytes=64 "
@@ -81,6 +92,17 @@ class AudioMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["decoded_jobs_with_nonzero_pcm"], 1)
         self.assertEqual(metrics["latest_decode_record"]["frames"], 4)
         self.assertEqual(metrics["latest_decode_record"]["pcm_peak"], 0.5)
+
+    def test_ajm_not_enough_room_is_not_misreported_as_codec_error(self):
+        line = (
+            "[AJM] decode: inst=16385 codec=1 fmt=2 ch=2 run=2 input_bytes=64 "
+            "input_used=64 output_bytes=8192 frames=4 result=0x10 internal=0 "
+            "pcm_nonzero=4000 pcm_rms=0.125000 pcm_peak=0.500000 nonfinite=0"
+        )
+        metrics = parse_ajm_decode_log(line)
+        self.assertEqual(metrics["decode_jobs_with_any_nonzero_result"], 1)
+        self.assertEqual(metrics["decode_jobs_with_error_result"], 0)
+        self.assertEqual(metrics["decode_jobs_with_not_enough_room_result"], 1)
 
 
 if __name__ == "__main__":

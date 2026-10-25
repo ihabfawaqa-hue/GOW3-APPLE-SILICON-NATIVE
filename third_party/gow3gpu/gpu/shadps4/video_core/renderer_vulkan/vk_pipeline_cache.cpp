@@ -328,6 +328,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
     const auto& vk12_props = instance.GetVk12Properties();
+    const bool fast_shader_math = [&] {
+        const char* value = std::getenv("GOW3_PRECISE_SHADER_MATH");
+        return instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp &&
+               !(value && value[0] == '1');
+    }();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
         .max_viewport_height = instance.GetMaxViewportHeight(),
@@ -353,12 +358,17 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .support_fp64_denorm_preserve = bool(vk12_props.shaderDenormPreserveFloat64),
         .support_fp64_denorm_flush = bool(vk12_props.shaderDenormFlushToZeroFloat64),
         .support_fp64_round_to_zero = bool(vk12_props.shaderRoundingModeRTZFloat64),
+        // gow3: on KosmicKrisp the preserve modes turn every pow, exp2, log2, sqrt, rsqrt,
+        // sin, cos, fma and min/max into Metal's precise:: library calls. One full-screen
+        // God of War III pass (three pows per sample for force_degamma) took ~17 ms on M2,
+        // latency-bound at 12% fragment occupancy. Metal's fast math is what shadPS4 gets on
+        // macOS through MoltenVK. GOW3_PRECISE_SHADER_MATH=1 keeps the preserve modes.
         .support_fp16_signed_zero_inf_nan_preserve =
-            bool(vk12_props.shaderSignedZeroInfNanPreserveFloat16),
+            bool(vk12_props.shaderSignedZeroInfNanPreserveFloat16) && !fast_shader_math,
         .support_fp32_signed_zero_inf_nan_preserve =
-            bool(vk12_props.shaderSignedZeroInfNanPreserveFloat32),
+            bool(vk12_props.shaderSignedZeroInfNanPreserveFloat32) && !fast_shader_math,
         .support_fp64_signed_zero_inf_nan_preserve =
-            bool(vk12_props.shaderSignedZeroInfNanPreserveFloat64),
+            bool(vk12_props.shaderSignedZeroInfNanPreserveFloat64) && !fast_shader_math,
         .supports_image_load_store_lod = instance_.IsImageLoadStoreLodSupported(),
         .supports_native_cube_calc = instance_.IsAmdGcnShaderSupported(),
         .supports_trinary_minmax = instance_.IsAmdShaderTrinaryMinMaxSupported(),

@@ -348,6 +348,7 @@ private:
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
     std::array<u64, AmdGpu::NUM_COLOR_BUFFERS + 2> diagnostic_pass_targets{};
+    bool diagnostic_flush_after_draw{};
     VAddr last_display_address{}; ///< display buffer of the previous draw (0: not one)
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;

@@ -794,20 +794,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     std::array<u16, AmdGpu::RegDirty::NumBlocks> blocks;
     u32 num_blocks = 0;
-#ifdef __GLIBCXX__
-    for (size_t block = dirty.blocks._Find_first(); block < dirty.blocks.size();
-         block = dirty.blocks._Find_next(block)) {
-        blocks[num_blocks++] = static_cast<u16>(block);
-    }
-#else
-    if (dirty.blocks.any()) {
-        for (size_t block = 0; block < dirty.blocks.size(); ++block) {
-            if (dirty.blocks.test(block)) {
-                blocks[num_blocks++] = static_cast<u16>(block);
-            }
-        }
-    }
-#endif
+    dirty.blocks.ForEach([&](u32 block) { blocks[num_blocks++] = static_cast<u16>(block); });
     const auto stages =
         pipeline ? pipeline->GetStages() : std::span<const Shader::Info* const>{};
     // Constants: copied here into the ring, the recording thread only binds them.
@@ -1200,8 +1187,27 @@ void Rasterizer::DiagnosticPassSubmit(const GraphicsPipeline* pipeline) {
         targets[cb] = cb_descs[cb].first.index;
     }
     targets[AmdGpu::NUM_COLOR_BUFFERS] = db_desc.first.index;
+    const u64 ps_hash =
+        pipeline->GetGraphicsKey().stage_hashes[static_cast<u32>(Shader::SwStage::Fragment)];
     if (pass_submit >= 2) {
-        targets.back() = pipeline->GetGraphicsKey().stage_hashes[static_cast<u32>(Shader::SwStage::Fragment)];
+        targets.back() = ps_hash;
+    }
+    // GOW3_DIAGNOSTIC_DRAW_PS=<hex>[,...]: draws of these pixel shaders get one commit each
+    // (DrawRecord submits again after the draw), for their exact per-draw GPU time.
+    static const std::vector<u64> single_draw = [] {
+        std::vector<u64> hashes;
+        if (const char* value = std::getenv("GOW3_DIAGNOSTIC_DRAW_PS")) {
+            for (const char* p = value; *p;) {
+                char* end = nullptr;
+                hashes.push_back(std::strtoull(p, &end, 16));
+                p = (end && *end == ',') ? end + 1 : (end ? end : p + std::strlen(p));
+            }
+        }
+        return hashes;
+    }();
+    if (std::find(single_draw.begin(), single_draw.end(), ps_hash) != single_draw.end()) {
+        diagnostic_flush_after_draw = true;
+        diagnostic_pass_targets = {};
     }
     if (targets != diagnostic_pass_targets) {
         diagnostic_pass_targets = targets;
@@ -1295,7 +1301,24 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
     motion_geometry = 0;
 
-    if (IsInvisibleDraw(*pipeline)) {
+    // GOW3_DIAGNOSTIC_SKIP_PS=<hex>[,...]: drop draws of these pixel shaders (cost
+    // measurement only: the image is wrong).
+    static const std::vector<u64> skip_ps = [] {
+        std::vector<u64> hashes;
+        if (const char* value = std::getenv("GOW3_DIAGNOSTIC_SKIP_PS")) {
+            for (const char* p = value; *p;) {
+                char* end = nullptr;
+                hashes.push_back(std::strtoull(p, &end, 16));
+                p = (end && *end == ',') ? end + 1 : (end ? end : p + std::strlen(p));
+            }
+        }
+        return hashes;
+    }();
+    if (IsInvisibleDraw(*pipeline) ||
+        (!skip_ps.empty() &&
+         std::find(skip_ps.begin(), skip_ps.end(),
+                   pipeline->GetGraphicsKey().stage_hashes[static_cast<u32>(
+                       Shader::SwStage::Fragment)]) != skip_ps.end())) {
         bind_prepared = nullptr;
         draw_inputs.pending = false;
         return;
@@ -1450,6 +1473,23 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const vk::Pipeline square = SquarePass(*pipeline);
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
+    // GOW3_DESCRIBE_PGM: the draw parameters of those pixel shaders' first draws.
+    if (static const char* describe_env = std::getenv("GOW3_DESCRIBE_PGM"); describe_env) {
+        const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        static std::unordered_map<u64, u32> described_draws;
+        char hash[20];
+        std::snprintf(hash, sizeof(hash), "%016llx",
+                      static_cast<unsigned long long>(ps ? ps->pgm_hash : 0));
+        if (ps && std::strstr(describe_env, hash) && described_draws[ps->pgm_hash]++ < 3) {
+            const auto& vp = regs.viewports[0];
+            std::printf("Describe %s draw: %u indices x %u instances, indexed %d, prim %u, "
+                        "vs %016llx, viewport scale %.1fx%.1f offset %.1f,%.1f, target %ux%u\n",
+                        hash, num_indices, num_instances, int(is_indexed),
+                        u32(regs.primitive_type),
+                        static_cast<unsigned long long>(vs_info.pgm_hash), vp.xscale, vp.yscale,
+                        vp.xoffset, vp.yoffset, u32(state.width), u32(state.height));
+        }
+    }
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
@@ -1483,6 +1523,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     DebugState.IncDrawCall();
 
+    if (diagnostic_flush_after_draw) {
+        diagnostic_flush_after_draw = false;
+        scheduler.EndRendering();
+        scheduler.Flush();
+    }
     ResetBindings(false);
     scheduler.KickRecording();
 }
@@ -2906,6 +2951,43 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
 void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                               Shader::Backend::Bindings& binding, u32& write_index) {
+    // gow3: GOW3_DESCRIBE_PGM=<hex pgm hash>[,...]: what the first draws of those shaders sample.
+    static const std::vector<u64> describe = [] {
+        std::vector<u64> hashes;
+        if (const char* value = std::getenv("GOW3_DESCRIBE_PGM")) {
+            for (const char* p = value; *p;) {
+                char* end = nullptr;
+                hashes.push_back(std::strtoull(p, &end, 16));
+                p = (end && *end == ',') ? end + 1 : (end ? end : p + std::strlen(p));
+            }
+        }
+        return hashes;
+    }();
+    static std::unordered_map<u64, u32> described;
+    if (!describe.empty() &&
+        std::find(describe.begin(), describe.end(), stage.pgm_hash) != describe.end() &&
+        described[stage.pgm_hash]++ < 3) {
+        for (u32 i = 0; i < stage.images.size(); ++i) {
+            const auto t = prepared ? prepared->image_sharps[i] : stage.images[i].GetSharp(stage);
+            std::printf("Describe %016llx image %u: %#llx %ux%u pitch %u mips %u..%u fmt %u/%u "
+                        "tile %u samples %u type %u\n",
+                        static_cast<unsigned long long>(stage.pgm_hash), i,
+                        static_cast<unsigned long long>(t.Address()), u32(t.width + 1),
+                        u32(t.height + 1), u32(t.pitch + 1), u32(t.base_level), u32(t.last_level),
+                        u32(t.data_format), u32(t.num_format), u32(t.tiling_index),
+                        t.NumSamples(), u32(t.type));
+        }
+        for (u32 i = 0; i < stage.samplers.size(); ++i) {
+            const auto ss =
+                prepared ? prepared->sampler_sharps[i] : stage.samplers[i].GetSharp(stage);
+            std::printf("Describe %016llx sampler %u: aniso %u mag %u min %u mip %u lod %.2f..%.2f "
+                        "bias %.2f (+host %.2f) clamp %u depth %d\n",
+                        static_cast<unsigned long long>(stage.pgm_hash), i, u32(ss.max_aniso.Value()),
+                        u32(ss.xy_mag_filter.Value()), u32(ss.xy_min_filter.Value()),
+                        u32(ss.mip_filter.Value()), ss.MinLod(), ss.MaxLod(), ss.LodBias(),
+                        sampler_lod_bias, u32(ss.clamp_x.Value()), int(stage.samplers[i].is_depth));
+        }
+    }
     for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =

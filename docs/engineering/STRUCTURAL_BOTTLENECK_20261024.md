@@ -276,3 +276,60 @@ about 1 FPS over the hour for both, and run-to-run noise at similar draw counts 
 ±0.5 FPS. The committed GPU code differs from that runtime by the equivalent fault/read
 reordering and environment-gated diagnostics; the bundled KosmicKrisp adds opt-in capture,
 MSL-dump and timing code. The gap is open and needs interleaved runs on a cool machine.
+
+# Part 4: from ~9 to ~30 FPS (2026-10-25)
+
+## Fast shader math (the GPU limit)
+
+`GOW3_DIAGNOSTIC_DRAW_PS=<hash>` gives single draws their own commit. Shader `c9faf22f47bfb5ca`
+is one full-screen triangle into a 960×540 target that samples two 960×540 RGBA8 textures
+(no anisotropy) 33 times per pixel. It took ~17 ms of GPU time per draw; `e14d91c27ca8102c`
+(1080p, 8 samples) took ~10 ms. `GOW3_DIAGNOSTIC_SKIP_PS` (drop those draws, image wrong)
+raised gameplay from ~9 to 18–19 FPS. Metal GPU counters during the draw showed fragment
+occupancy ~12%, ALU limiter ~40%, texture limiters ~1%, memory bandwidth ~0.3 GB/s: a
+latency-bound shader.
+
+The cause: shadPS4 emits `SignedZeroInfNanPreserve` on every shader, and KosmicKrisp then
+emits every `pow`, `exp2`, `log2`, `sqrt`, `rsqrt`, `sin`, `cos`, `fma` and `fmin`/`fmax` as Metal's
+`precise::` library call. This shader runs three `pow`s per sample for the GCN sampler's
+`force_degamma` (sRGB decode). On KosmicKrisp the preserve modes are now off (Metal fast math,
+which is what shadPS4 gets on macOS through MoltenVK), and pixel shaders no longer mark
+arithmetic `NoContraction` (each such operation became `fp math_mode(safe)`).
+`GOW3_PRECISE_SHADER_MATH=1` restores both; the shader cache version is 10 (9 for the precise
+mode), so switching recompiles. Gameplay went from 8–10 to 20–28 FPS. The GPU-tick wait share
+fell from ~87% to 0–40%.
+
+## Thread priorities (the CPU limit)
+
+The game's main thread spent ~31% of its time spinning in `fn_0x1a5d10` (`while (*p) pause`)
+until its job workers finished. The guest main thread now runs at QoS user-interactive
+(`PS4_GUEST_MAIN_QOS=default` leaves it). God of War III's `WorkerThread*` workers get the
+existing job-worker class (`initiated`). Raising the workers to interactive starved the GPU
+threads (13–21 FPS). The GPU command processor, draw recorder, Vulkan recorder and copy
+threads now set QoS user-interactive themselves (`Gow3Threads::MakeCritical`): threads
+otherwise inherit their creator's class, and a copy pool started from a background helper ran
+on the efficiency cores.
+
+`RegDirty::blocks` (1,664 register blocks) was a `std::bitset` scanned bit by bit per draw on
+libc++ (no find-next); it is now a word array walked with count-trailing-zeros.
+
+## Results
+
+Same opening combat segment, 5 s windows with 2,000–3,700 draws per frame:
+
+| Build | FPS per window |
+|---|---|
+| Before fast math | 7.9–10.7 |
+| Fast math | 20–28 |
+| Fast math, main thread interactive | 31.5–37.1 (one run); later runs 24–38 |
+
+The best runs hold 33.3 ms frames (vsync's 2-vblank step) with p99 of 33.4–50 ms. Run-to-run
+and late-run variation is large on this hot, fanless machine. The remaining limit is the CPU:
+the command processor (~89%), the game's main thread (~84%), the draw recorder (~81%), the
+game's audio thread `brbDriver` (~80%) and the Vulkan recorder (~78%) are five busy threads
+for four performance cores. In slow frames the Vulkan recorder is 10–30 ms behind; a quarter of
+its time is copying guest buffers (`BufferCache::RunGuestCopy`), which submissions wait for.
+
+Next for 60 FPS (16.7 ms frames): move guest buffer copies off the Vulkan recorder thread,
+cut the command processor's and the recorder's per-draw cost (~2,800 draws a frame), and
+reduce the GPU threads' combined share of the performance cores.

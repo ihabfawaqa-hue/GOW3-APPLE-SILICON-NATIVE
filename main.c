@@ -31,6 +31,15 @@ static const char *get_game_path(void) {
 // Guest code runs on a secondary host thread so the host main thread stays free
 // for AppKit (window creation, event pumping, dialogs).
 static void *guest_main(void *p) {
+#if defined(__APPLE__)
+    // The game's main thread runs its frame and waits for its job workers: it must not lose
+    // the performance cores to the GPU emulation threads (USER_INTERACTIVE). PS4_GUEST_MAIN_QOS
+    // =default leaves it at the creation class.
+    pthread_setname_np("guest-main");
+    const char *main_qos = getenv("PS4_GUEST_MAIN_QOS");
+    if (!main_qos || strcmp(main_qos, "default") != 0)
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     GuestMainArgs *a = (GuestMainArgs *)p;
     int argc = a->argc;
     char **argv = a->argv;

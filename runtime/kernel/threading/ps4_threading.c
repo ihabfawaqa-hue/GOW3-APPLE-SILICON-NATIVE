@@ -182,8 +182,12 @@ static void recomp_thread_epilogue(RecompThread *t, GuestContext *ctx) {
 // Idle workers spin instead of sleeping, so "interactive" puts six spinning threads next to the
 // CP and encoder threads; it exists for experiments only.
 static void guest_worker_apply_qos(const char *name) {
+  // Job workers: Naughty Dog's engine ("NdJobWorkerThread*") and God of War III ("WorkerThread*",
+  // whose main thread spins until their jobs finish).
   static const char kPrefix[] = "NdJobWorkerThread";
-  if (strncmp(name, kPrefix, sizeof kPrefix - 1) != 0) return;
+  static const char kGow3Prefix[] = "WorkerThread";
+  if (strncmp(name, kPrefix, sizeof kPrefix - 1) != 0 &&
+      strncmp(name, kGow3Prefix, sizeof kGow3Prefix - 1) != 0) return;
   const char *e = getenv("PS4_GUEST_WORKER_QOS");
   if (!e || !e[0]) e = "initiated";
   if (strcmp(e, "default") == 0) return;

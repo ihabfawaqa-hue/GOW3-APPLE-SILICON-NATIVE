@@ -32,7 +32,13 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 7u; // gow3: interpolated integer fix (Pascal)
+// gow3: 10 = fast shader math on KosmicKrisp (no SignedZeroInfNanPreserve, pixel shaders
+// without NoContraction); 9 = GOW3_PRECISE_SHADER_MATH=1 (the earlier emission). Switching
+// recompiles instead of reusing the other mode's SPIR-V.
+static const u32 ShaderBinaryVersion = [] {
+    const char* value = std::getenv("GOW3_PRECISE_SHADER_MATH");
+    return value && value[0] == '1' ? 9u : 10u;
+}();
 static constexpr u32 ShaderMetaVersion = 8u; // gow3: ARM64 flattened user-data read metadata
 static constexpr u32 PipelineKeyVersion = 6u; // gow3: ARM64 flattened user-data read metadata
 } // namespace Serialization

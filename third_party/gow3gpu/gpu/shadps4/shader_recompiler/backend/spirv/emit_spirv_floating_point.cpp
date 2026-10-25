@@ -1,12 +1,28 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 
 namespace Shader::Backend::SPIRV {
 
+// gow3: on KosmicKrisp every NoContraction operation becomes Metal `fp math_mode(safe)`.
+// Contraction only matters where results must be bit-identical across shaders (positions
+// computed again in later passes), so pixel shaders leave it out.
+// GOW3_PRECISE_SHADER_MATH=1 keeps the old emission everywhere.
+bool PreciseShaderMath() {
+    static const bool precise = [] {
+        const char* value = std::getenv("GOW3_PRECISE_SHADER_MATH");
+        return value && value[0] == '1';
+    }();
+    return precise;
+}
+
 Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
+    if (!PreciseShaderMath() && ctx.sw_stage == SwStage::Fragment) {
+        return op;
+    }
     ctx.Decorate(op, spv::Decoration::NoContraction);
     return op;
 }

@@ -11,6 +11,7 @@
 #include <vector>
 #include "gow3_copy.h"
 #include "gow3_toggles.h"
+#include "gow3_threads.h"
 #include <cstdio>
 #include <boost/preprocessor/stringize.hpp>
 
@@ -124,6 +125,7 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
+    Gow3Threads::MakeCritical();
 #if defined(__linux__)
     if (clockid_t clock; pthread_getcpuclockid(pthread_self(), &clock) == 0) {
         Gow3Stats::gpu_thread_clock.store(static_cast<int>(clock));

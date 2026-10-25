@@ -159,6 +159,7 @@ private:
 
     void Run(std::stop_token stop) {
         Common::SetCurrentThreadName("gow3:DrawRec");
+        Gow3Threads::MakeCritical();
         on_stage_b = true;
         stage_b_tid.store(static_cast<u32>(Common::CurrentThreadId()), std::memory_order_release);
         u64 at = 0;

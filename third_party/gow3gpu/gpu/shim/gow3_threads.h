@@ -34,6 +34,9 @@ inline unsigned Available() {
 inline void MakeBackground() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
 }
+
+/// The calling thread is on a frame's critical path.
+inline void MakeCritical() {}
 #elif defined(__APPLE__)
 
 /// Hardware threads available to the process.
@@ -44,6 +47,14 @@ inline unsigned Available() {
 /// Keep speculative worker activity below interactive guest threads.
 inline void MakeBackground() {
     pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+}
+
+/// The calling thread is on a frame's critical path (GPU command processing, recording, the
+/// copies submissions wait for): performance cores. Set explicitly: a thread otherwise inherits
+/// the class of whichever thread created it, so a pool started from a background helper ran on
+/// the efficiency cores and submissions waited 10-30 ms a frame for its copies.
+inline void MakeCritical() {
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 }
 
 #else
@@ -65,6 +76,9 @@ inline void MakeBackground() {
         setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 19);
     }
 }
+
+/// The calling thread is on a frame's critical path.
+inline void MakeCritical() {}
 #endif
 
 } // namespace Gow3Threads

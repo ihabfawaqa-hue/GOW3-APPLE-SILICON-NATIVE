@@ -89,14 +89,16 @@ processor, draw recorder and Vulkan recorder each 70–99% busy on four performa
 
 ## Update (late evening): guest memory accesses without the inline crossing check
 
-`tools/peephole_guest_code.py` drops the 16-byte-crossing check from 120,360 of 128,203 guarded
+`tools/peephole_guest_code.py` drops the 16-byte-crossing check from 118,461 of 128,203 guarded
 guest loads/stores: they become `add x7, x28, x16 ; ldapr/stlr` (6 instructions and a taken
 branch → 2). An access that does cross faults; `runtime/core/tso_crossing.c` runs the old
 crossing path for it (plain access + the same barrier) and resumes, so x86 ordering is unchanged.
 Fault path verified on the host (416 cases: all access kinds, both scratch registers, xzr, x16/x17;
 2.2 µs each) and in one loaded-save run (no FATAL). That run had ~200,000 crossings/s in gameplay
 (36 FPS, droppier): the game writes 8-byte values at 4-byte alignment in command-buffer builders.
-The 426 sites seen are in `tools/tso_crossing_sites.txt`; every access of the 143 functions holding
-them keeps its check. That build is NOT yet measured. The runtime logs `[tso]` lines with the
+The 578 sites seen are in `tools/tso_crossing_sites.txt`; every access of the 182 functions holding
+them keeps its check. With 426 sites: 50.2 FPS on the loaded save (was ~41), ~4,000 faults/s; with
+578: under 10 faults/s (one run ended in the known intermittent GPU-library fault at host 0x20000,
+also seen at 03:45 and 09:36 before this change). The runtime logs `[tso]` lines with the
 fault rate and top sites (`GOW3_TSO_SITES=<file>` dumps all); add new hot sites to the list.
 `GOW3_GUEST_TSO_CHECKS=1 python3 tools/generate_build_ninja.py ...` restores every check.

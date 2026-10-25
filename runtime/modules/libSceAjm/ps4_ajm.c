@@ -332,6 +332,11 @@ static AjmPcmMetrics ajm_measure_output(const AjmParsedJob *job, size_t byte_cou
 }
 
 // --- ATRAC9 helpers ---
+static void ajm_reset_stream_bookkeeping(AjmInstance *inst) {
+    inst->total_samples = 0;
+    memset(&inst->gapless, 0, sizeof(inst->gapless));
+}
+
 static bool at9_init(AjmInstance *inst, const uint8_t *cfg) {
     memcpy(inst->at9_config, cfg, 4);
     if (inst->at9_handle) {
@@ -339,6 +344,9 @@ static bool at9_init(AjmInstance *inst, const uint8_t *cfg) {
         inst->at9_handle = NULL;
     }
     inst->is_initialized = false;
+    inst->superframe_bytes_remain = 0;
+    inst->at9_num_frames = 0;
+    memset(&inst->at9_info, 0, sizeof(inst->at9_info));
     inst->at9_handle = Atrac9GetHandle();
     if (!inst->at9_handle) return false;
     int ret = Atrac9InitDecoder(inst->at9_handle, inst->at9_config);
@@ -368,6 +376,11 @@ static bool at9_parse_riff(AjmInstance *inst, uint8_t **pin, size_t *prem) {
     size_t size = *prem;
     if (size < 12) return false;
     if (memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WAVE", 4) != 0) return false;
+
+    // A RIFF stream is a new decoder stream even when the AJM instance is
+    // reused. Reset before walking chunks so fmt/fact can arrive in either
+    // order without carrying state over from the previous stream.
+    ajm_reset_stream_bookkeeping(inst);
 
     size_t offset = 12;
     while (offset + 8 <= size) {
@@ -406,8 +419,7 @@ static bool at9_parse_riff(AjmInstance *inst, uint8_t **pin, size_t *prem) {
 }
 
 static void ajm_instance_reset(AjmInstance *inst) {
-    inst->total_samples = 0;
-    memset(&inst->gapless, 0, sizeof(inst->gapless));
+    ajm_reset_stream_bookkeeping(inst);
     if (inst->codec_type == AJM_CODEC_AT9_DEC) {
         if (inst->is_initialized) {
             uint8_t cfg[4];
@@ -705,20 +717,24 @@ static void process_single_job(AjmParsedJob *job) {
     if (control_flags & AJM_CONTROL_RESET) {
         ajm_instance_reset(inst);
     }
-    // Input control sideband order: [format (24)], [gapless (8)], [resample (8)], [init params (8)]
+    // Input control sideband order: [format (24)], [gapless (8)], [resample (8)], [init params (8)].
+    // Read the fields in wire order, but initialize the decoder before applying
+    // the new stream's gapless metadata. Initialization must clear bookkeeping
+    // from a previous stream before the new sideband is interpreted.
     {
         uint8_t *in_cur = (uint8_t *)job->control_in_buf;
         uint8_t *in_end = in_cur ? in_cur + job->control_in_size : NULL;
+        OrbisAjmSidebandGaplessDecode gapless_input = {0};
+        bool have_gapless_input = false;
         if (in_cur && (sideband_flags & AJM_SIDEBAND_FORMAT) &&
             in_cur + sizeof(OrbisAjmSidebandFormat) <= in_end) {
             in_cur += sizeof(OrbisAjmSidebandFormat);
         }
         if (in_cur && (sideband_flags & AJM_SIDEBAND_GAPLESS) &&
             in_cur + sizeof(OrbisAjmSidebandGaplessDecode) <= in_end) {
-            OrbisAjmSidebandGaplessDecode gp;
-            memcpy(&gp, in_cur, sizeof(gp));
-            result_code |= ajm_apply_gapless_input(inst, &gp);
-            in_cur += sizeof(gp);
+            memcpy(&gapless_input, in_cur, sizeof(gapless_input));
+            have_gapless_input = true;
+            in_cur += sizeof(gapless_input);
         }
         if (in_cur && (control_flags & AJM_CONTROL_RESAMPLE) && in_cur + 8 <= in_end) {
             in_cur += 8;
@@ -727,6 +743,7 @@ static void process_single_job(AjmParsedJob *job) {
             size_t rem = (size_t)(in_end - in_cur);
             if (inst->codec_type == AJM_CODEC_AT9_DEC) {
                 if (rem >= 4) {
+                    ajm_reset_stream_bookkeeping(inst);
                     if (!at9_init(inst, in_cur)) {
                         result_code |= ORBIS_AJM_RESULT_INVALID_PARAM;
                     }
@@ -734,11 +751,15 @@ static void process_single_job(AjmParsedJob *job) {
                     result_code |= ORBIS_AJM_RESULT_INVALID_PARAM;
                 }
             } else if (inst->codec_type == AJM_CODEC_MP3_DEC) {
+                ajm_reset_stream_bookkeeping(inst);
                 mp3dec_init(&inst->mp3d);
                 inst->mp3_inited = true;
                 inst->is_initialized = true;
             }
             in_cur += rem < 8 ? rem : 8;
+        }
+        if (have_gapless_input) {
+            result_code |= ajm_apply_gapless_input(inst, &gapless_input);
         }
     }
 

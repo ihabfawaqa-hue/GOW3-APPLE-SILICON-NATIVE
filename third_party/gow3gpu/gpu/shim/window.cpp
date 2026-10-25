@@ -26,6 +26,11 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
 #ifdef __APPLE__
+    const char* high_density = std::getenv("GOW3_HIGH_DPI");
+    const bool high_density_enabled = high_density && high_density[0] == '1';
+    if (high_density_enabled) {
+        SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
+    }
     // The pinned renderer creates VK_EXT_metal_surface directly from SDL's
     // CAMetalLayer. Asking SDL to create a Vulkan window also makes SDL load
     // its own portability library, which is not the selected Vulkan ICD.
@@ -98,7 +103,13 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_GetWindowSizeInPixels(window, &w, &h);
     width = w;
     height = h;
-    LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
+    LOG_INFO(Frontend, "Window {}x{} pixels (high-DPI {}) on {}", w, h,
+#ifdef __APPLE__
+             high_density_enabled ? "enabled" : "disabled",
+#else
+             "unsupported",
+#endif
+             driver);
 }
 
 // Windowed, borderless (desktop-sized, no mode change) or exclusive fullscreen at the desktop

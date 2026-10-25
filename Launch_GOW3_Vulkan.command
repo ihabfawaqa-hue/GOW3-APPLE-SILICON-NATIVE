@@ -10,10 +10,16 @@ export PS4_APP_DIR="${PS4_APP_DIR:-$GOW3_DIR}"
 export PS4_STALL_WATCHDOG="${PS4_STALL_WATCHDOG:-3000}"
 export PS4_SCREENSHOT_DIR="${PS4_SCREENSHOT_DIR:-./screenshots}"
 export PS4_SCREENSHOT_EVERY="${PS4_SCREENSHOT_EVERY:-60}"
+# The macOS eboot runs at its native 60 Hz; keep presenter caps aligned unless
+# the caller explicitly identifies a different patched engine rate.
+export GOW3_ENGINE_FPS="${GOW3_ENGINE_FPS:-60}"
 
-# Borderless fullscreen by default. The window is not high-DPI, so on a MacBook Air M2 the
-# 16:9 picture is presented at 1710x961 points (scaled by macOS to the panel), with thin bars
-# above and below on the 16:10 screen. The game still renders at 1080p.
+# Borderless fullscreen by default. Set GOW3_HIGH_DPI=1 to opt into a Retina
+# drawable; GOW3_OUTPUT_RES=2560x1440 selects a 1440p target, and GOW3_FSR1=1
+# enables FSR1 scaling. Keep FSR1 off when combining 1440p with high-DPI: that
+# combination has produced black output and a presenter crash in local runs.
+# Output scaling preserves the game's 16:9 aspect ratio.
+# The default remains the lower-cost 1x/1080p path until high-DPI performance is measured.
 # GOW3_DISPLAY=windowed opens a window instead (as does display_mode in gow3.ini when this is off).
 if [ "${GOW3_DISPLAY:-}" != "windowed" ]; then
     export GOW3_FULLSCREEN=1

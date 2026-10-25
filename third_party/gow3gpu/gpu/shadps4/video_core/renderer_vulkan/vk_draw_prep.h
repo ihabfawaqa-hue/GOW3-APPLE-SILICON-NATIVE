@@ -113,8 +113,13 @@ public:
     /// GPU thread: the prepared state for the next direct draw of the current submission.
     const PreparedDraw* NextDraw();
 
-    /// GPU thread: counts whether a prepared draw was used; prints every 5 s (GOW3_FRAME_STATS).
-    void Count(bool used);
+    /// How the GPU thread selected a draw's pipeline: from its prepared state, or itself because
+    /// the draw had no slot (its buffer was not scanned yet, or it is in an indirect buffer), the
+    /// slot was not ready, or the prepared state did not match.
+    enum class Outcome : u8 { Used, NoSlot, NotReady, Rejected, Count };
+
+    /// GPU thread: counts a draw's outcome; prints every 5 s (GOW3_FRAME_STATS).
+    void Count(Outcome outcome);
 
     struct Submission {
         u64 seq{};
@@ -159,9 +164,9 @@ public:
     }
 
 private:
-    u32 current_draw = 0;
-    bool current_scanned = false; ///< `current` was scanned at BeginSubmission: its slots exist
-    u64 used = 0, unused = 0;
+    u32 current_draw = 0;         ///< direct draws of `current` passed so far
+    bool current_scanned = false; ///< `current` has been scanned: its slots exist
+    u64 outcomes[static_cast<size_t>(Outcome::Count)]{};
     u32 worker_count = 0; ///< fixed before the worker threads start
     std::jthread scanner;
     std::vector<std::jthread> workers;

@@ -789,10 +789,24 @@ public:
     /// gow3: GOW3_RECORDING_CHECK=1 reports two threads recording into the current command
     /// buffer at once (direct Record() calls, the recording thread's chunks, submission) and
     /// any use of the scheduler by one thread while another holds the raw command buffer
-    /// (from CommandBuffer() until its KickRecording() or submission).
+    /// (from CommandBuffer() until its KickRecording() or submission), and two threads adding
+    /// commands to the deferred chunks at once (Record, RecordData, KickRecording: the chunk
+    /// being filled is not shared).
     static bool RecordingCheckEnabled();
     bool RecordingEnter(const char* where);
     void RecordingExit(bool owned);
+    bool ProducerEnter(const char* where);
+    void ProducerExit(bool owned);
+    /// GOW3_RECORDING_CHECK: marks this thread as adding to the deferred chunks until destroyed.
+    struct ProducerScope {
+        Scheduler* scheduler;
+        bool owned;
+        ProducerScope(Scheduler* s, const char* where)
+            : scheduler{s}, owned{RecordingCheckEnabled() && s->ProducerEnter(where)} {}
+        ~ProducerScope() {
+            scheduler->ProducerExit(owned);
+        }
+    };
     void NoteRawCommandBuffer();
     void CheckRawOwner(const char* where);
     void ReleaseRawCommandBuffer(const char* where);
@@ -812,6 +826,7 @@ public:
         if (RecordingCheckEnabled()) [[unlikely]] {
             CheckRawOwner("deferred Record");
         }
+        const ProducerScope producer{this, "deferred Record"};
         if (Gow3Toggle::Disabled(Gow3Toggle::ThreadedRecording)) {
             SyncRecording();
             direct_mode = true;
@@ -839,6 +854,7 @@ public:
             return;
         }
         ASSERT(bytes + 1024 <= RecordChunk::Capacity);
+        const ProducerScope producer{this, "ReserveRecordData"};
         if (RecordChunk::Capacity - record_chunk->Size() < bytes + 1024) {
             full_chunks.push_back(std::move(record_chunk));
             record_chunk = AcquireChunk();
@@ -854,6 +870,7 @@ public:
         }
         // Room for the data and the command that follows it, so both stay in one chunk.
         const size_t bytes = data.size_bytes();
+        const ProducerScope producer{this, "RecordData"};
         ReserveRecordData(bytes + alignof(T));
         auto* dst = static_cast<T*>(record_chunk->Allocate(bytes, alignof(T)));
         std::memcpy(dst, data.data(), bytes);
@@ -974,6 +991,8 @@ private:
     std::atomic<u64> check_owner{0};
     std::atomic<const char*> check_where{nullptr};
     std::atomic<u64> check_raw_owner{0};
+    std::atomic<u64> check_producer{0};
+    std::atomic<const char*> check_producer_where{nullptr};
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;

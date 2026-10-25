@@ -1135,6 +1135,22 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         u32 vertex_binding = 0;
         for (const auto& attrib : sel.fetch_shader->attributes) {
             const auto& buffer = attrib.GetSharp(*vs_info);
+            if (sel.worker) {
+                // gow3: a preparation worker runs ahead on registers rebuilt from the scanned
+                // buffers, which can differ from the GPU thread's (registers set outside them)
+                // and point at a descriptor that is not one: it gives the draw up instead of
+                // asserting, and the GPU thread selects that draw's pipeline itself.
+                const auto format = Vulkan::LiverpoolToVK::TrySurfaceFormat(
+                    buffer.GetDataFmt(), buffer.GetNumberFmt());
+                if (vertex_binding >= MaxVertexBufferCount ||
+                    (format == vk::Format::eUndefined &&
+                     buffer.GetDataFmt() != AmdGpu::DataFormat::FormatInvalid)) {
+                    sel.worker->failed = true;
+                    return false;
+                }
+                key.vertex_buffer_formats[vertex_binding++] = format;
+                continue;
+            }
             ASSERT_MSG(vertex_binding < MaxVertexBufferCount,
                        "Vertex attribute binding count exceeded limit: {} >= {}", vertex_binding,
                        MaxVertexBufferCount);

@@ -256,6 +256,26 @@ bool Scheduler::RecordingEnter(const char* where) {
     return false;
 }
 
+bool Scheduler::ProducerEnter(const char* where) {
+    const u64 me = CurrentThreadKey();
+    u64 expected = 0;
+    if (check_producer.compare_exchange_strong(expected, me, std::memory_order_acq_rel)) {
+        check_producer_where.store(where, std::memory_order_relaxed);
+        return true;
+    }
+    if (expected != me) {
+        ReportRecordingConflict("concurrent chunk producers", expected,
+                                check_producer_where.load(std::memory_order_relaxed), where);
+    }
+    return false;
+}
+
+void Scheduler::ProducerExit(bool owned) {
+    if (owned) {
+        check_producer.store(0, std::memory_order_release);
+    }
+}
+
 void Scheduler::CheckRawOwner(const char* where) {
     const u64 raw = check_raw_owner.load(std::memory_order_acquire);
     if (raw && raw != CurrentThreadKey()) {
@@ -407,6 +427,7 @@ void Scheduler::KickRecording(bool force) {
     if (!recording_threaded) {
         return;
     }
+    const ProducerScope producer{this, "KickRecording"};
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
     ReleaseRawCommandBuffer("kick");
     direct_mode = false;

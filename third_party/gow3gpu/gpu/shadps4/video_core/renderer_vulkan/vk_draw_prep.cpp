@@ -280,8 +280,6 @@ void DrawPreparation::BeginSubmission(u64 seq, const AmdGpu::Regs& regs, u64 reg
     if (!submissions.empty() && seq >= submissions.front()->seq &&
         seq - submissions.front()->seq < submissions.size()) {
         current = submissions[seq - submissions.front()->seq];
-        // Not scanned yet: its draw slots do not exist; the GPU thread prepares every draw itself.
-        current_scanned = current->scanned.load(std::memory_order_acquire);
     }
 }
 
@@ -296,10 +294,19 @@ void DrawPreparation::EndSubmission() {
 }
 
 const PreparedDraw* DrawPreparation::NextDraw() {
-    if (!current || !current_scanned || current_draw >= current->num_draws) {
+    if (!current) {
         return nullptr;
     }
-    const PreparedDraw* draw = &current->draws[current_draw++];
+    const u32 ordinal = current_draw++;
+    // The slots exist once the scanner publishes them (`scanned`, release). A buffer the scanner
+    // has not reached gets them part-way through: the draws before go without.
+    if (!current_scanned) {
+        current_scanned = current->scanned.load(std::memory_order_acquire);
+    }
+    if (!current_scanned || ordinal >= current->num_draws) {
+        return nullptr;
+    }
+    const PreparedDraw* draw = &current->draws[ordinal];
     if (Gow3Toggle::Disabled(Gow3Toggle::DrawPreparation)) {
         return nullptr;
     }
@@ -328,7 +335,7 @@ void DrawPreparation::Collect() {
 
 void DrawPreparation::ScannerLoop(std::stop_token stop) {
     Common::SetCurrentThreadName("gow3:DrawScan");
-    Gow3Threads::MakeBackground();
+    Gow3Threads::MakeSupporting();
     std::unique_ptr<AmdGpu::Regs> regs;
     u64 checksum = 0;
     u64 next_seq = 0;
@@ -490,11 +497,12 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
     }
 }
 
-void DrawPreparation::Count(bool was_used) {
-    ++(was_used ? used : unused);
+void DrawPreparation::Count(Outcome outcome) {
+    ++outcomes[static_cast<size_t>(outcome)];
     static const bool stats = std::getenv("GOW3_FRAME_STATS") != nullptr;
+    static u32 counted = 0;
     // The clock is read every 1024 draws: per draw it was 8% of the GPU thread.
-    if (!stats || ((used + unused) & 1023) != 0) {
+    if (!stats || (++counted & 1023) != 0) {
         return;
     }
     static auto window = std::chrono::steady_clock::now();
@@ -503,11 +511,15 @@ void DrawPreparation::Count(bool was_used) {
         return;
     }
     window = now;
-    std::printf("Draw preparation: %llu prepared pipelines used, %llu not (%u workers, "
-                "%llu scanner rebases)\n",
-                static_cast<unsigned long long>(used), static_cast<unsigned long long>(unused),
-                worker_count, static_cast<unsigned long long>(rebases));
-    used = unused = 0;
+    const auto n = [&](Outcome o) {
+        return static_cast<unsigned long long>(outcomes[static_cast<size_t>(o)]);
+    };
+    std::printf("Draw preparation: %llu prepared pipelines used, %llu not (%llu without a slot, "
+                "%llu not ready, %llu rejected) (%u workers, %llu scanner rebases)\n",
+                n(Outcome::Used), n(Outcome::NoSlot) + n(Outcome::NotReady) + n(Outcome::Rejected),
+                n(Outcome::NoSlot), n(Outcome::NotReady), n(Outcome::Rejected), worker_count,
+                static_cast<unsigned long long>(rebases));
+    std::fill(std::begin(outcomes), std::end(outcomes), 0);
 }
 
 } // namespace Vulkan

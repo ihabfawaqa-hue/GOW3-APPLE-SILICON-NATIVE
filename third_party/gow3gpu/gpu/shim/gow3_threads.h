@@ -37,6 +37,9 @@ inline void MakeBackground() {
 
 /// The calling thread is on a frame's critical path.
 inline void MakeCritical() {}
+
+/// The calling thread feeds the critical path ahead of time and must keep up with it.
+inline void MakeSupporting() {}
 #elif defined(__APPLE__)
 
 /// Hardware threads available to the process.
@@ -55,6 +58,13 @@ inline void MakeBackground() {
 /// the efficiency cores and submissions waited 10-30 ms a frame for its copies.
 inline void MakeCritical() {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+}
+
+/// The calling thread feeds the critical path ahead of time and must keep up with it (the draw
+/// scanner: a buffer it has not scanned when the GPU thread reaches it gets no prepared draws).
+/// Below the critical threads, above the speculative helpers.
+inline void MakeSupporting() {
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
 }
 
 #else
@@ -79,6 +89,9 @@ inline void MakeBackground() {
 
 /// The calling thread is on a frame's critical path.
 inline void MakeCritical() {}
+
+/// The calling thread feeds the critical path ahead of time and must keep up with it.
+inline void MakeSupporting() {}
 #endif
 
 } // namespace Gow3Threads

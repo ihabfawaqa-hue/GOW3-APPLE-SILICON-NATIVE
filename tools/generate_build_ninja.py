@@ -9,6 +9,8 @@ reuse the existing objects.
 from __future__ import annotations
 
 import argparse
+import os
+import re
 from pathlib import Path
 import sys
 
@@ -46,6 +48,8 @@ def collect_sources(root: Path) -> tuple[list[Path], list[Path]]:
 
     local_sources = [Path("main.c"), Path("trampoline_arm64.s")]
     for assembly in sorted(root.glob("code_*.s")):
+        if not re.fullmatch(r"code_\d+\.s", assembly.name):
+            continue  # code_NNN.opt.s: the peephole output of code_NNN.s
         local_sources.append(assembly.relative_to(root))
         registration = assembly.with_name(assembly.stem + "_reg.c")
         if registration.is_file():
@@ -197,6 +201,10 @@ def render(root: Path) -> str:
         "  deps = gcc",
         "  description = CXX23 $in",
         "",
+        "rule peephole_guest",
+        "  command = python3 tools/peephole_guest_code.py $in $out > /dev/null",
+        "  description = PEEPHOLE $in",
+        "",
         "rule archive_gcn",
         "  command = libtool -static -o $out $in",
         "  description = AR $out",
@@ -211,7 +219,15 @@ def render(root: Path) -> str:
 
     rule_for = {".c": "compile_c", ".s": "compile_s", ".m": "compile_m",
                 ".mm": "compile_mm", ".cpp": "compile_cpp"}
+    # Recompiled guest code goes through exact peephole rewrites (tools/peephole_guest_code.py)
+    # before it is assembled; GOW3_GUEST_PEEPHOLE=0 when generating assembles it unchanged.
+    peephole = os.environ.get("GOW3_GUEST_PEEPHOLE", "1") != "0"
     for source in app_sources:
+        if peephole and re.fullmatch(r"code_\d+\.s", source.as_posix()):
+            optimized = source.with_suffix(".opt.s").as_posix()
+            lines.append(f"build {optimized}: peephole_guest {source.as_posix()} | tools/peephole_guest_code.py")
+            lines.append(f"build {object_for(source).as_posix()}: compile_s {optimized}")
+            continue
         lines.append(f"build {object_for(source).as_posix()}: {rule_for[source.suffix]} {source.as_posix()}")
     for source in cpp23_sources:
         lines.append(f"build {object_for(source, cxx23=True).as_posix()}: compile_cpp23 {source.as_posix()}")

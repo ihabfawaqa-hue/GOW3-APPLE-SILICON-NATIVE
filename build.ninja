@@ -47,6 +47,10 @@ rule compile_cpp23
   deps = gcc
   description = CXX23 $in
 
+rule peephole_guest
+  command = python3 tools/peephole_guest_code.py $in $out > /dev/null
+  description = PEEPHOLE $in
+
 rule archive_gcn
   command = libtool -static -o $out $in
   description = AR $out
@@ -59,127 +63,188 @@ rule link_bin
 
 build main.o: compile_c main.c
 build trampoline_arm64.o: compile_s trampoline_arm64.s
-build code_000.o: compile_s code_000.s
+build code_000.opt.s: peephole_guest code_000.s | tools/peephole_guest_code.py
+build code_000.o: compile_s code_000.opt.s
 build code_000_reg.o: compile_c code_000_reg.c
-build code_001.o: compile_s code_001.s
+build code_001.opt.s: peephole_guest code_001.s | tools/peephole_guest_code.py
+build code_001.o: compile_s code_001.opt.s
 build code_001_reg.o: compile_c code_001_reg.c
-build code_002.o: compile_s code_002.s
+build code_002.opt.s: peephole_guest code_002.s | tools/peephole_guest_code.py
+build code_002.o: compile_s code_002.opt.s
 build code_002_reg.o: compile_c code_002_reg.c
-build code_003.o: compile_s code_003.s
+build code_003.opt.s: peephole_guest code_003.s | tools/peephole_guest_code.py
+build code_003.o: compile_s code_003.opt.s
 build code_003_reg.o: compile_c code_003_reg.c
-build code_004.o: compile_s code_004.s
+build code_004.opt.s: peephole_guest code_004.s | tools/peephole_guest_code.py
+build code_004.o: compile_s code_004.opt.s
 build code_004_reg.o: compile_c code_004_reg.c
-build code_005.o: compile_s code_005.s
+build code_005.opt.s: peephole_guest code_005.s | tools/peephole_guest_code.py
+build code_005.o: compile_s code_005.opt.s
 build code_005_reg.o: compile_c code_005_reg.c
-build code_006.o: compile_s code_006.s
+build code_006.opt.s: peephole_guest code_006.s | tools/peephole_guest_code.py
+build code_006.o: compile_s code_006.opt.s
 build code_006_reg.o: compile_c code_006_reg.c
-build code_007.o: compile_s code_007.s
+build code_007.opt.s: peephole_guest code_007.s | tools/peephole_guest_code.py
+build code_007.o: compile_s code_007.opt.s
 build code_007_reg.o: compile_c code_007_reg.c
-build code_008.o: compile_s code_008.s
+build code_008.opt.s: peephole_guest code_008.s | tools/peephole_guest_code.py
+build code_008.o: compile_s code_008.opt.s
 build code_008_reg.o: compile_c code_008_reg.c
-build code_009.o: compile_s code_009.s
+build code_009.opt.s: peephole_guest code_009.s | tools/peephole_guest_code.py
+build code_009.o: compile_s code_009.opt.s
 build code_009_reg.o: compile_c code_009_reg.c
-build code_010.o: compile_s code_010.s
+build code_010.opt.s: peephole_guest code_010.s | tools/peephole_guest_code.py
+build code_010.o: compile_s code_010.opt.s
 build code_010_reg.o: compile_c code_010_reg.c
-build code_011.o: compile_s code_011.s
+build code_011.opt.s: peephole_guest code_011.s | tools/peephole_guest_code.py
+build code_011.o: compile_s code_011.opt.s
 build code_011_reg.o: compile_c code_011_reg.c
-build code_012.o: compile_s code_012.s
+build code_012.opt.s: peephole_guest code_012.s | tools/peephole_guest_code.py
+build code_012.o: compile_s code_012.opt.s
 build code_012_reg.o: compile_c code_012_reg.c
-build code_013.o: compile_s code_013.s
+build code_013.opt.s: peephole_guest code_013.s | tools/peephole_guest_code.py
+build code_013.o: compile_s code_013.opt.s
 build code_013_reg.o: compile_c code_013_reg.c
-build code_014.o: compile_s code_014.s
+build code_014.opt.s: peephole_guest code_014.s | tools/peephole_guest_code.py
+build code_014.o: compile_s code_014.opt.s
 build code_014_reg.o: compile_c code_014_reg.c
-build code_015.o: compile_s code_015.s
+build code_015.opt.s: peephole_guest code_015.s | tools/peephole_guest_code.py
+build code_015.o: compile_s code_015.opt.s
 build code_015_reg.o: compile_c code_015_reg.c
-build code_016.o: compile_s code_016.s
+build code_016.opt.s: peephole_guest code_016.s | tools/peephole_guest_code.py
+build code_016.o: compile_s code_016.opt.s
 build code_016_reg.o: compile_c code_016_reg.c
-build code_017.o: compile_s code_017.s
+build code_017.opt.s: peephole_guest code_017.s | tools/peephole_guest_code.py
+build code_017.o: compile_s code_017.opt.s
 build code_017_reg.o: compile_c code_017_reg.c
-build code_018.o: compile_s code_018.s
+build code_018.opt.s: peephole_guest code_018.s | tools/peephole_guest_code.py
+build code_018.o: compile_s code_018.opt.s
 build code_018_reg.o: compile_c code_018_reg.c
-build code_019.o: compile_s code_019.s
+build code_019.opt.s: peephole_guest code_019.s | tools/peephole_guest_code.py
+build code_019.o: compile_s code_019.opt.s
 build code_019_reg.o: compile_c code_019_reg.c
-build code_020.o: compile_s code_020.s
+build code_020.opt.s: peephole_guest code_020.s | tools/peephole_guest_code.py
+build code_020.o: compile_s code_020.opt.s
 build code_020_reg.o: compile_c code_020_reg.c
-build code_021.o: compile_s code_021.s
+build code_021.opt.s: peephole_guest code_021.s | tools/peephole_guest_code.py
+build code_021.o: compile_s code_021.opt.s
 build code_021_reg.o: compile_c code_021_reg.c
-build code_022.o: compile_s code_022.s
+build code_022.opt.s: peephole_guest code_022.s | tools/peephole_guest_code.py
+build code_022.o: compile_s code_022.opt.s
 build code_022_reg.o: compile_c code_022_reg.c
-build code_023.o: compile_s code_023.s
+build code_023.opt.s: peephole_guest code_023.s | tools/peephole_guest_code.py
+build code_023.o: compile_s code_023.opt.s
 build code_023_reg.o: compile_c code_023_reg.c
-build code_024.o: compile_s code_024.s
+build code_024.opt.s: peephole_guest code_024.s | tools/peephole_guest_code.py
+build code_024.o: compile_s code_024.opt.s
 build code_024_reg.o: compile_c code_024_reg.c
-build code_025.o: compile_s code_025.s
+build code_025.opt.s: peephole_guest code_025.s | tools/peephole_guest_code.py
+build code_025.o: compile_s code_025.opt.s
 build code_025_reg.o: compile_c code_025_reg.c
-build code_026.o: compile_s code_026.s
+build code_026.opt.s: peephole_guest code_026.s | tools/peephole_guest_code.py
+build code_026.o: compile_s code_026.opt.s
 build code_026_reg.o: compile_c code_026_reg.c
-build code_027.o: compile_s code_027.s
+build code_027.opt.s: peephole_guest code_027.s | tools/peephole_guest_code.py
+build code_027.o: compile_s code_027.opt.s
 build code_027_reg.o: compile_c code_027_reg.c
-build code_028.o: compile_s code_028.s
+build code_028.opt.s: peephole_guest code_028.s | tools/peephole_guest_code.py
+build code_028.o: compile_s code_028.opt.s
 build code_028_reg.o: compile_c code_028_reg.c
-build code_029.o: compile_s code_029.s
+build code_029.opt.s: peephole_guest code_029.s | tools/peephole_guest_code.py
+build code_029.o: compile_s code_029.opt.s
 build code_029_reg.o: compile_c code_029_reg.c
-build code_030.o: compile_s code_030.s
+build code_030.opt.s: peephole_guest code_030.s | tools/peephole_guest_code.py
+build code_030.o: compile_s code_030.opt.s
 build code_030_reg.o: compile_c code_030_reg.c
-build code_031.o: compile_s code_031.s
+build code_031.opt.s: peephole_guest code_031.s | tools/peephole_guest_code.py
+build code_031.o: compile_s code_031.opt.s
 build code_031_reg.o: compile_c code_031_reg.c
-build code_032.o: compile_s code_032.s
+build code_032.opt.s: peephole_guest code_032.s | tools/peephole_guest_code.py
+build code_032.o: compile_s code_032.opt.s
 build code_032_reg.o: compile_c code_032_reg.c
-build code_033.o: compile_s code_033.s
+build code_033.opt.s: peephole_guest code_033.s | tools/peephole_guest_code.py
+build code_033.o: compile_s code_033.opt.s
 build code_033_reg.o: compile_c code_033_reg.c
-build code_034.o: compile_s code_034.s
+build code_034.opt.s: peephole_guest code_034.s | tools/peephole_guest_code.py
+build code_034.o: compile_s code_034.opt.s
 build code_034_reg.o: compile_c code_034_reg.c
-build code_035.o: compile_s code_035.s
+build code_035.opt.s: peephole_guest code_035.s | tools/peephole_guest_code.py
+build code_035.o: compile_s code_035.opt.s
 build code_035_reg.o: compile_c code_035_reg.c
-build code_036.o: compile_s code_036.s
+build code_036.opt.s: peephole_guest code_036.s | tools/peephole_guest_code.py
+build code_036.o: compile_s code_036.opt.s
 build code_036_reg.o: compile_c code_036_reg.c
-build code_037.o: compile_s code_037.s
+build code_037.opt.s: peephole_guest code_037.s | tools/peephole_guest_code.py
+build code_037.o: compile_s code_037.opt.s
 build code_037_reg.o: compile_c code_037_reg.c
-build code_038.o: compile_s code_038.s
+build code_038.opt.s: peephole_guest code_038.s | tools/peephole_guest_code.py
+build code_038.o: compile_s code_038.opt.s
 build code_038_reg.o: compile_c code_038_reg.c
-build code_039.o: compile_s code_039.s
+build code_039.opt.s: peephole_guest code_039.s | tools/peephole_guest_code.py
+build code_039.o: compile_s code_039.opt.s
 build code_039_reg.o: compile_c code_039_reg.c
-build code_040.o: compile_s code_040.s
+build code_040.opt.s: peephole_guest code_040.s | tools/peephole_guest_code.py
+build code_040.o: compile_s code_040.opt.s
 build code_040_reg.o: compile_c code_040_reg.c
-build code_041.o: compile_s code_041.s
+build code_041.opt.s: peephole_guest code_041.s | tools/peephole_guest_code.py
+build code_041.o: compile_s code_041.opt.s
 build code_041_reg.o: compile_c code_041_reg.c
-build code_042.o: compile_s code_042.s
+build code_042.opt.s: peephole_guest code_042.s | tools/peephole_guest_code.py
+build code_042.o: compile_s code_042.opt.s
 build code_042_reg.o: compile_c code_042_reg.c
-build code_043.o: compile_s code_043.s
+build code_043.opt.s: peephole_guest code_043.s | tools/peephole_guest_code.py
+build code_043.o: compile_s code_043.opt.s
 build code_043_reg.o: compile_c code_043_reg.c
-build code_044.o: compile_s code_044.s
+build code_044.opt.s: peephole_guest code_044.s | tools/peephole_guest_code.py
+build code_044.o: compile_s code_044.opt.s
 build code_044_reg.o: compile_c code_044_reg.c
-build code_045.o: compile_s code_045.s
+build code_045.opt.s: peephole_guest code_045.s | tools/peephole_guest_code.py
+build code_045.o: compile_s code_045.opt.s
 build code_045_reg.o: compile_c code_045_reg.c
-build code_046.o: compile_s code_046.s
+build code_046.opt.s: peephole_guest code_046.s | tools/peephole_guest_code.py
+build code_046.o: compile_s code_046.opt.s
 build code_046_reg.o: compile_c code_046_reg.c
-build code_047.o: compile_s code_047.s
+build code_047.opt.s: peephole_guest code_047.s | tools/peephole_guest_code.py
+build code_047.o: compile_s code_047.opt.s
 build code_047_reg.o: compile_c code_047_reg.c
-build code_048.o: compile_s code_048.s
+build code_048.opt.s: peephole_guest code_048.s | tools/peephole_guest_code.py
+build code_048.o: compile_s code_048.opt.s
 build code_048_reg.o: compile_c code_048_reg.c
-build code_049.o: compile_s code_049.s
+build code_049.opt.s: peephole_guest code_049.s | tools/peephole_guest_code.py
+build code_049.o: compile_s code_049.opt.s
 build code_049_reg.o: compile_c code_049_reg.c
-build code_050.o: compile_s code_050.s
+build code_050.opt.s: peephole_guest code_050.s | tools/peephole_guest_code.py
+build code_050.o: compile_s code_050.opt.s
 build code_050_reg.o: compile_c code_050_reg.c
-build code_051.o: compile_s code_051.s
+build code_051.opt.s: peephole_guest code_051.s | tools/peephole_guest_code.py
+build code_051.o: compile_s code_051.opt.s
 build code_051_reg.o: compile_c code_051_reg.c
-build code_052.o: compile_s code_052.s
+build code_052.opt.s: peephole_guest code_052.s | tools/peephole_guest_code.py
+build code_052.o: compile_s code_052.opt.s
 build code_052_reg.o: compile_c code_052_reg.c
-build code_053.o: compile_s code_053.s
+build code_053.opt.s: peephole_guest code_053.s | tools/peephole_guest_code.py
+build code_053.o: compile_s code_053.opt.s
 build code_053_reg.o: compile_c code_053_reg.c
-build code_054.o: compile_s code_054.s
+build code_054.opt.s: peephole_guest code_054.s | tools/peephole_guest_code.py
+build code_054.o: compile_s code_054.opt.s
 build code_054_reg.o: compile_c code_054_reg.c
-build code_055.o: compile_s code_055.s
+build code_055.opt.s: peephole_guest code_055.s | tools/peephole_guest_code.py
+build code_055.o: compile_s code_055.opt.s
 build code_055_reg.o: compile_c code_055_reg.c
-build code_056.o: compile_s code_056.s
+build code_056.opt.s: peephole_guest code_056.s | tools/peephole_guest_code.py
+build code_056.o: compile_s code_056.opt.s
 build code_056_reg.o: compile_c code_056_reg.c
-build code_057.o: compile_s code_057.s
+build code_057.opt.s: peephole_guest code_057.s | tools/peephole_guest_code.py
+build code_057.o: compile_s code_057.opt.s
 build code_057_reg.o: compile_c code_057_reg.c
-build code_058.o: compile_s code_058.s
+build code_058.opt.s: peephole_guest code_058.s | tools/peephole_guest_code.py
+build code_058.o: compile_s code_058.opt.s
 build code_058_reg.o: compile_c code_058_reg.c
-build code_059.o: compile_s code_059.s
+build code_059.opt.s: peephole_guest code_059.s | tools/peephole_guest_code.py
+build code_059.o: compile_s code_059.opt.s
 build code_059_reg.o: compile_c code_059_reg.c
-build code_060.o: compile_s code_060.s
+build code_060.opt.s: peephole_guest code_060.s | tools/peephole_guest_code.py
+build code_060.o: compile_s code_060.opt.s
 build code_060_reg.o: compile_c code_060_reg.c
 build dispatch.o: compile_c dispatch.c
 build guest_modules.o: compile_c guest_modules.c

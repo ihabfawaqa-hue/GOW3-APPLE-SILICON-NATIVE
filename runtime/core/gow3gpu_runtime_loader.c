@@ -26,6 +26,29 @@ typedef int (*CandidateFaultFn)(void *ucontext, void *address);
 static void *g_candidate_library;
 static ResolveNidFn g_candidate_resolve;
 
+/* The overlay's list picker (the save list of sceSaveDataDialog). Optional exports:
+ * without them a list answers as cancelled. */
+typedef int (*ChoiceBeginFn)(const char *title, const char *const *items,
+                             const char *const *images, int count, int focus);
+typedef int (*ChoicePollFn)(void);
+static ChoiceBeginFn g_choice_begin;
+static ChoicePollFn g_choice_poll;
+typedef int (*CapturesInputFn)(void);
+static CapturesInputFn g_captures_input;
+
+int ps4_gow3gpu_overlay_captures_input(void) {
+  return g_captures_input ? g_captures_input() : 0;
+}
+
+int ps4_gow3gpu_choice_begin(const char *title, const char *const *items,
+                             const char *const *images, int count, int focus) {
+  return g_choice_begin ? g_choice_begin(title, items, images, count, focus) : 0;
+}
+
+int ps4_gow3gpu_choice_poll(void) {
+  return g_choice_poll ? g_choice_poll() : -2;
+}
+
 uintptr_t ps4_gow3gpu_resolve_candidate(const char *scoped_nid) {
   if (!scoped_nid || !g_candidate_resolve ||
       !ps4_gow3gpu_submission_backend_active())
@@ -114,6 +137,10 @@ int ps4_gow3gpu_start_requested_backend(GuestContext *ctx) {
   if (!set_memory_api || !set_host_api || !candidate_init || !register_kernel ||
       !resolve || !handle_fault)
     return -1;
+  g_choice_begin = (ChoiceBeginFn)dlsym(g_candidate_library, "gow3gpu_choice_begin");
+  g_choice_poll = (ChoicePollFn)dlsym(g_candidate_library, "gow3gpu_choice_poll");
+  g_captures_input =
+      (CapturesInputFn)dlsym(g_candidate_library, "gow3gpu_overlay_captures_input");
 
   if (ps4_gow3gpu_install_runtime_apis(ctx, set_memory_api, set_host_api,
                                        handle_fault) != 0) {

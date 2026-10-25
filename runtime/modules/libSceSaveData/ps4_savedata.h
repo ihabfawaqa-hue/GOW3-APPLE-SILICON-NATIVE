@@ -94,6 +94,9 @@ typedef struct Ps4SaveDataParam {
 bool ps4_savedata_read_dir_info(int32_t user_id, const char *dir_name,
                                 Ps4SaveDataParam *out_param, uint64_t *out_bytes);
 
+// Host path of <save root>/user_<uid>/<dirName>; false when it is not an existing directory.
+bool ps4_savedata_dir_path(int32_t user_id, const char *dir_name, char *out, size_t out_size);
+
 // C API
 int32_t sceSaveDataInitialize(const void *param);
 int32_t sceSaveDataInitialize2(const void *param);

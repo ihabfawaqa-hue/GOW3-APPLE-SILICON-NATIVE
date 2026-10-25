@@ -785,6 +785,14 @@ bool ps4_savedata_read_dir_info(int32_t user_id, const char *dir_name,
     return true;
 }
 
+bool ps4_savedata_dir_path(int32_t user_id, const char *dir_name, char *out, size_t out_size) {
+    if (!out || !dir_name || !*dir_name || strchr(dir_name, '/') ||
+        strlen(dir_name) >= SD_DIRNAME_SIZE || !strcmp(dir_name, ".") || !strcmp(dir_name, ".."))
+        return false;
+    sd_dir_path(user_id, dir_name, out, out_size);
+    return sd_is_dir(out);
+}
+
 static int sd_rm_cb(const char *path, const struct stat *st, int flag, struct FTW *ftw) {
     (void)st; (void)ftw;
     if (flag == FTW_DP || flag == FTW_D) return rmdir(path);

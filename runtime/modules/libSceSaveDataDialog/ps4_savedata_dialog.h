@@ -33,19 +33,20 @@ typedef enum OrbisCommonDialogStatus {
 
 #endif // ORBIS_COMMON_DIALOG_TYPES_DEFINED
 
+// Values as the SDK (and shadPS4) define them: LIST is 1 and PROGRESS_BAR 5.
 typedef enum OrbisSaveDataDialogMode {
     ORBIS_SAVE_DATA_DIALOG_MODE_INVALID      = 0,
-    ORBIS_SAVE_DATA_DIALOG_MODE_USER_MSG     = 1,
-    ORBIS_SAVE_DATA_DIALOG_MODE_PROGRESS_BAR = 2,
+    ORBIS_SAVE_DATA_DIALOG_MODE_LIST         = 1,
+    ORBIS_SAVE_DATA_DIALOG_MODE_USER_MSG     = 2,
     ORBIS_SAVE_DATA_DIALOG_MODE_SYSTEM_MSG   = 3,
     ORBIS_SAVE_DATA_DIALOG_MODE_ERROR_CODE   = 4,
-    ORBIS_SAVE_DATA_DIALOG_MODE_LIST         = 5
+    ORBIS_SAVE_DATA_DIALOG_MODE_PROGRESS_BAR = 5
 } OrbisSaveDataDialogMode;
 
 typedef enum OrbisSaveDataDialogType {
-    ORBIS_SAVE_DATA_DIALOG_TYPE_SAVE   = 0,
-    ORBIS_SAVE_DATA_DIALOG_TYPE_LOAD   = 1,
-    ORBIS_SAVE_DATA_DIALOG_TYPE_DELETE = 2
+    ORBIS_SAVE_DATA_DIALOG_TYPE_SAVE   = 1,
+    ORBIS_SAVE_DATA_DIALOG_TYPE_LOAD   = 2,
+    ORBIS_SAVE_DATA_DIALOG_TYPE_DELETE = 3
 } OrbisSaveDataDialogType;
 
 typedef struct OrbisSaveDataDialogParam {
@@ -76,14 +77,6 @@ typedef struct OrbisSaveDataDialogResult {
     uint8_t reserved[32];
 } OrbisSaveDataDialogResult;
 
-// C API
-int32_t sceSaveDataDialogInitialize(void);
-int32_t sceSaveDataDialogOpen(const OrbisSaveDataDialogParam *param);
-OrbisCommonDialogStatus sceSaveDataDialogUpdateStatus(void);
-OrbisCommonDialogStatus sceSaveDataDialogGetStatus(void);
-int32_t sceSaveDataDialogGetResult(OrbisSaveDataDialogResult *result);
-int32_t sceSaveDataDialogTerminate(void);
-
 // Shims
 void shim_sceSaveDataDialogInitialize(GuestContext *ctx);
 void shim_sceSaveDataDialogOpen(GuestContext *ctx);
@@ -91,6 +84,9 @@ void shim_sceSaveDataDialogUpdateStatus(GuestContext *ctx);
 void shim_sceSaveDataDialogGetStatus(GuestContext *ctx);
 void shim_sceSaveDataDialogGetResult(GuestContext *ctx);
 void shim_sceSaveDataDialogTerminate(GuestContext *ctx);
+void shim_sceSaveDataDialogClose(GuestContext *ctx);
+void shim_sceSaveDataDialogIsReadyToDisplay(GuestContext *ctx);
+void shim_sceSaveDataDialogProgressBarSetValue(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

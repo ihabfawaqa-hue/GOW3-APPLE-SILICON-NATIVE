@@ -23,6 +23,7 @@ static pthread_mutex_t g_pad_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int32_t g_next_pad_handle = 1;
 static int g_pad_inited = 0;
 
+int ps4_gow3gpu_overlay_captures_input(void);
 static uint32_t g_key_buttons = 0;
 static uint8_t g_key_l2 = 0;
 static uint8_t g_key_r2 = 0;
@@ -615,6 +616,13 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
     }
   }
 
+  // The GPU overlay (its menu, text entry or the save list) has the keyboard and pad: the
+  // game sees a neutral pad, so choosing a save does not also press Cross in the game.
+  if (ps4_gow3gpu_overlay_captures_input()) {
+    buttons = 0;
+    lx = ly = rx = ry = 128;
+    l2 = r2 = 0;
+  }
   data->buttons = buttons;
   data->leftStick.x = lx;
   data->leftStick.y = ly;

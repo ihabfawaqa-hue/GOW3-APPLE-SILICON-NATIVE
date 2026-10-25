@@ -9,7 +9,8 @@ env = dict(os.environ,
     PS4_GOW3GPU_BACKEND="gow3gpu-vulkan",
     PS4_GOW3GPU_LIBRARY=os.path.expanduser("~/Library/Application Support/GOW3Lab/runtime/current/libgow3gpu.dylib"),
     VK_DRIVER_FILES=os.path.expanduser("~/Library/Application Support/GOW3Lab/runtime/current/kosmickrisp_icd.json"),
-    **extra_env)
+    )
+env.update(extra_env)  # overrides (a driver or library under test) win over the defaults
 before = set(runs.iterdir())
 p = subprocess.Popen([sys.executable, "scripts/lab/iterate.py", "--mode", "smoke", "--skip-build",
     "--runtime-seconds", secs, "--screenshot-every", "15", "--max-log-mb", "32", "--max-capture-mb", "768",

@@ -1,0 +1,13 @@
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_pool.h b/src/kosmickrisp/vulkan/kk_cmd_pool.h
+index 479e70e..f471797 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_pool.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_pool.h
+@@ -15,7 +15,7 @@
+ #include "util/u_dynarray.h"
+ 
+ #define KK_CMD_BO_SIZE     (1024 * 128)
+-#define KK_CMD_POOL_BO_MAX 32
++#define KK_CMD_POOL_BO_MAX 1024
+ 
+ /* Recyclable command buffer BO, used for both push buffers and upload */
+ struct kk_cmd_bo {

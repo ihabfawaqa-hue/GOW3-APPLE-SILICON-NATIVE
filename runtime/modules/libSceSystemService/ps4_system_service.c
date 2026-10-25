@@ -57,6 +57,10 @@ int32_t sceSystemServiceGetStatus(void) {
 int32_t sceSystemServiceGetDisplaySafeAreaInfo(void *info) {
     if (!info) return -EINVAL;
     memset(info, 0, 32);
+    // SceSystemServiceDisplaySafeAreaInfo.ratio: the share of the screen the game may use.
+    // 0.0 made God of War III draw its picture at 80% inside black borders.
+    const float ratio = 1.0f;
+    memcpy(info, &ratio, sizeof(ratio));
     return 0;
 }
 

@@ -11,9 +11,11 @@ export PS4_STALL_WATCHDOG="${PS4_STALL_WATCHDOG:-3000}"
 export PS4_SCREENSHOT_DIR="${PS4_SCREENSHOT_DIR:-./screenshots}"
 export PS4_SCREENSHOT_EVERY="${PS4_SCREENSHOT_EVERY:-60}"
 
-# GOW3_DISPLAY=2k: borderless fullscreen; on a 2560-wide display (MacBook Air M2:
-# 2560x1664) the 16:9 picture is presented at 2560x1440. The game still renders at 1080p.
-if [ "${GOW3_DISPLAY:-}" = "2k" ]; then
+# Borderless fullscreen by default. The window is not high-DPI, so on a MacBook Air M2 the
+# 16:9 picture is presented at 1710x961 points (scaled by macOS to the panel), with thin bars
+# above and below on the 16:10 screen. The game still renders at 1080p.
+# GOW3_DISPLAY=windowed opens a window instead (as does display_mode in gow3.ini when this is off).
+if [ "${GOW3_DISPLAY:-}" != "windowed" ]; then
     export GOW3_FULLSCREEN=1
 fi
 

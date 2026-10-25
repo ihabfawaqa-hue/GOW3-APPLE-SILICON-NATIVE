@@ -17,9 +17,12 @@ print(f"[{tag}] run {run.name}; " + " ".join(l for l in out.splitlines() if l.st
 rows = list(csv.DictReader(open(csv_path))) if csv_path.exists() else []
 game = []
 for prev, cur in zip(rows, rows[1:]):
-    scene = int(cur["scene_draws"]) - int(prev["scene_draws"])
     draws = int(cur["draws"]) - int(prev["draws"])
-    if scene > 0 and draws > 500:
+    # scene_draws is not populated by all runtime configurations. Gameplay is
+    # still visible in the cumulative draw counter: intro/menu frames stay near
+    # 13 draws, while gameplay is hundreds to thousands of draws per flip.
+    if draws > 500:
+        scene = int(cur["scene_draws"]) - int(prev["scene_draws"])
         game.append(((int(cur["time_ns"]) - int(prev["time_ns"])) / 1e6, draws, scene,
                      int(cur["reduced_draws"]) - int(prev["reduced_draws"])))
 tail = game[-300:]
@@ -29,10 +32,13 @@ if not tail:
 ms = sorted(t[0] for t in tail)
 q = lambda p: ms[min(len(ms) - 1, int(p * len(ms)))]
 draws = statistics.median(t[1] for t in tail)
-reduced = sum(t[3] for t in tail) / max(1, sum(t[2] for t in tail))
+scene_draws = sum(t[2] for t in tail)
+scaled = (f"{100 * sum(t[3] for t in tail) / scene_draws:.0f}%"
+          if scene_draws else "not reported")
 print(f"[{tag}] gameplay flips {len(game)} (last {len(tail)}): median {q(0.5):.1f} ms "
       f"({1000 / q(0.5):.1f} FPS), p95 {q(0.95):.1f} ms, p99 {q(0.99):.1f} ms, "
-      f"mean FPS {1000 * len(ms) / sum(ms):.2f}, draws/flip {draws:.0f}, scaled scene draws {100 * reduced:.0f}%")
+      f"mean FPS {1000 * len(ms) / sum(ms):.2f}, draws/flip {draws:.0f}, "
+      f"scaled scene draws {scaled}")
 frames = sorted((run / "frames").glob("frame_candidate_output_*.png"))
 if frames:
     dst = S / f"bench_{tag}.png"

@@ -2,7 +2,7 @@
 Usage: sample_busy.py <sample.txt> [thread-substring-to-dump-hot-leaves]"""
 import re, sys, collections
 WAIT = re.compile(r"__psynch_cvwait|__psynch_mutexwait|semaphore_\w*wait|mach_msg|__semwait_signal|kevent|__select|"
-                  r"nanosleep|__ulock_wait|__workq_kernreturn|__sigwait|read \(in libsystem_kernel|__wait4|poll |"
+                  r"nanosleep|__ulock_wait|__workq_kernreturn|__sigwait|read\s+\(in libsystem_kernel|__wait4|poll |"
                   r"__psynch_rw|swtch_pri|thread_switch|__accept|recvfrom|__pthread_kill|usleep|sched_yield")
 lines = open(sys.argv[1]).read().split("\n")
 start = next(i for i, l in enumerate(lines) if l.startswith("Call graph:"))

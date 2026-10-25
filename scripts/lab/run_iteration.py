@@ -721,8 +721,10 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true", help="Use the existing binary; the default always runs Ninja first.")
     parser.add_argument("--build-only", action="store_true", help="Build and report architecture without starting the game.")
     args = parser.parse_args()
-    if not 1 <= args.runtime_seconds <= 300:
-        parser.error("--runtime-seconds must be between 1 and 300 for the bounded smoke mode")
+    # GOW3_LAB_MAX_SECONDS raises the bound for driven sessions (menus, loading a save).
+    max_seconds = float(os.environ.get("GOW3_LAB_MAX_SECONDS", "300"))
+    if not 1 <= args.runtime_seconds <= max_seconds:
+        parser.error(f"--runtime-seconds must be between 1 and {max_seconds:g} for the bounded smoke mode")
     if not 1 <= args.max_log_mb <= 128:
         parser.error("--max-log-mb must be between 1 and 128")
     if not 128 <= args.max_capture_mb <= 4096:

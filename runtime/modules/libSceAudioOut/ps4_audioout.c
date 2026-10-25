@@ -103,6 +103,8 @@ typedef struct {
   uint64_t pace_wait_samples;
   uint64_t pace_wait_sum_ns;
   uint64_t pace_clock_resets;
+  uint64_t last_grain_hash; // diagnostic: a grain identical to the previous one
+  uint64_t repeated_grains;
   uint64_t outputs;
   uint64_t underruns;
   // stats (guest input after volume, before mixing)
@@ -157,6 +159,21 @@ static uint64_t get_time_nanos(void) {
 }
 
 static uint64_t get_time_micros(void) { return get_time_nanos() / 1000ULL; }
+
+// PS4_AUDIO_PACING: how an output call is paced while the host device runs.
+//   device   (default) the call returns once the port ring has room for the next grain,
+//            so the guest's audio thread follows the device clock (the behavior before
+//            the deadline pacing; gameplay audio pitched and warbled with deadlines).
+//   deadline the call also sleeps to a steady per-port clock steered by ring fill.
+// Without a host device both use the per-port clock.
+static int audio_deadline_pacing(void) {
+  static int mode = -1;
+  if (mode < 0) {
+    const char *e = getenv("PS4_AUDIO_PACING");
+    mode = (e && strcmp(e, "deadline") == 0) ? 1 : 0;
+  }
+  return mode;
+}
 
 static bool audio_log_enabled(void) {
   if (g_log < 0) {
@@ -259,7 +276,8 @@ static void audio_stats_maybe_log(void) {
     if (p->pace_interval_samples) {
       fprintf(stderr,
               "[AudioOut] pacing port %d: intervals=%llu avg_ms=%.3f max_ms=%.3f "
-              "planned_wait_avg_ms=%.3f queue_min=%u adjust_us=%.1f resets=%llu\n",
+              "planned_wait_avg_ms=%.3f queue_min=%u adjust_us=%.1f resets=%llu "
+              "repeated_grains=%llu mode=%s\n",
               i, (unsigned long long)p->pace_interval_samples,
               (double)p->pace_interval_sum_ns / (double)p->pace_interval_samples / 1e6,
               (double)p->pace_max_interval_ns / 1e6,
@@ -268,7 +286,8 @@ static void audio_stats_maybe_log(void) {
                   : 0.0,
               p->pace_last_window_min_fill,
               (double)p->pace_adjust_ns / 1000.0,
-              (unsigned long long)p->pace_clock_resets);
+              (unsigned long long)p->pace_clock_resets,
+              (unsigned long long)p->repeated_grains, audio_deadline_pacing() ? "deadline" : "device");
       p->pace_interval_samples = 0;
       p->pace_interval_sum_ns = 0;
       p->pace_max_interval_ns = 0;
@@ -675,6 +694,18 @@ static void audio_port_push(Ps4AudioPort *p, const void *pcm) {
   uint32_t len = p->length > 2048 ? 2048 : p->length;
   audio_convert(p, (const uint8_t *)pcm, tmp, len);
   p->outputs++;
+  {
+    // A non-silent grain identical to the previous one: the guest re-sent stale PCM.
+    uint64_t h = 1469598103934665603ULL;
+    bool audible = false;
+    const uint8_t *bytes = (const uint8_t *)tmp;
+    for (size_t i = 0; i < (size_t)len * 2 * sizeof(float); i++) {
+      h = (h ^ bytes[i]) * 1099511628211ULL;
+      audible |= bytes[i] != 0;
+    }
+    if (audible && h == p->last_grain_hash) p->repeated_grains++;
+    p->last_grain_hash = h;
+  }
   if (!g_host_running) {
     return; // nobody consumes the ring
   }
@@ -788,10 +819,12 @@ int32_t ps4_audioout_port_output(int32_t handle, const void *pcm) {
   if (pcm) {
     audio_port_push(port, pcm);
   }
-  uint64_t deadline = audio_port_prepare_deadline(port, g_host_running);
+  const bool host = g_host_running;
+  uint64_t deadline = audio_port_prepare_deadline(port, host);
   audio_stats_maybe_log();
   pthread_mutex_unlock(&g_audio_lock);
-  audio_port_sleep_until(deadline);
+  if (!host || audio_deadline_pacing())
+    audio_port_sleep_until(deadline);
   return pcm ? (int32_t)len : 0;
 }
 
@@ -872,10 +905,11 @@ void shim_sceAudioOutOutputs(GuestContext *ctx) {
   }
   int32_t h0 = *(int32_t *)(ctx->mem_base + param_addr);
   Ps4AudioPort *first = audio_port_get(h0);
-  uint64_t deadline = first ? audio_port_prepare_deadline(first, g_host_running) : 0;
+  const bool host = g_host_running;
+  uint64_t deadline = first ? audio_port_prepare_deadline(first, host) : 0;
   audio_stats_maybe_log();
   pthread_mutex_unlock(&g_audio_lock);
-  if (first)
+  if (first && (!host || audio_deadline_pacing()))
     audio_port_sleep_until(deadline);
   ctx->rax = (uint64_t)len;
   SHIM_RETURN();

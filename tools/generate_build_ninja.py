@@ -202,7 +202,7 @@ def render(root: Path) -> str:
         "  description = CXX23 $in",
         "",
         "rule peephole_guest",
-        "  command = python3 tools/peephole_guest_code.py $in $out > /dev/null",
+        "  command = python3 tools/peephole_guest_code.py $peephole_flags $in $out > /dev/null",
         "  description = PEEPHOLE $in",
         "",
         "rule archive_gcn",
@@ -220,12 +220,15 @@ def render(root: Path) -> str:
     rule_for = {".c": "compile_c", ".s": "compile_s", ".m": "compile_m",
                 ".mm": "compile_mm", ".cpp": "compile_cpp"}
     # Recompiled guest code goes through exact peephole rewrites (tools/peephole_guest_code.py)
-    # before it is assembled; GOW3_GUEST_PEEPHOLE=0 when generating assembles it unchanged.
+    # before it is assembled; GOW3_GUEST_PEEPHOLE=0 when generating assembles it unchanged, and
+    # GOW3_GUEST_TSO_CHECKS=1 keeps the inline 16-byte-crossing check of every guest access.
     peephole = os.environ.get("GOW3_GUEST_PEEPHOLE", "1") != "0"
+    keep_checks = os.environ.get("GOW3_GUEST_TSO_CHECKS", "0") == "1"
+    lines.append(f"peephole_flags = {'--keep-tso-checks' if keep_checks else ''}")
     for source in app_sources:
         if peephole and re.fullmatch(r"code_\d+\.s", source.as_posix()):
             optimized = source.with_suffix(".opt.s").as_posix()
-            lines.append(f"build {optimized}: peephole_guest {source.as_posix()} | tools/peephole_guest_code.py")
+            lines.append(f"build {optimized}: peephole_guest {source.as_posix()} | tools/peephole_guest_code.py tools/tso_crossing_sites.txt")
             lines.append(f"build {object_for(source).as_posix()}: compile_s {optimized}")
             continue
         lines.append(f"build {object_for(source).as_posix()}: {rule_for[source.suffix]} {source.as_posix()}")

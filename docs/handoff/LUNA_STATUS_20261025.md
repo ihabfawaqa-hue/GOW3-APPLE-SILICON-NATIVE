@@ -86,3 +86,17 @@ main menu > Load (`PS4_SAVEDATA_DIALOG_AUTO=0`). Runtime `20261025-151116-c268c9
 Frame rate now: 38–45 FPS in the loaded Mount Olympus scene (~800–2,100 draws), 30–36 FPS in the
 New Game opening combat (~2,500–3,100 draws). The limit is the GPU command pipeline (command
 processor, draw recorder and Vulkan recorder each 70–99% busy on four performance cores).
+
+## Update (late evening): guest memory accesses without the inline crossing check
+
+`tools/peephole_guest_code.py` drops the 16-byte-crossing check from 120,360 of 128,203 guarded
+guest loads/stores: they become `add x7, x28, x16 ; ldapr/stlr` (6 instructions and a taken
+branch → 2). An access that does cross faults; `runtime/core/tso_crossing.c` runs the old
+crossing path for it (plain access + the same barrier) and resumes, so x86 ordering is unchanged.
+Fault path verified on the host (416 cases: all access kinds, both scratch registers, xzr, x16/x17;
+2.2 µs each) and in one loaded-save run (no FATAL). That run had ~200,000 crossings/s in gameplay
+(36 FPS, droppier): the game writes 8-byte values at 4-byte alignment in command-buffer builders.
+The 426 sites seen are in `tools/tso_crossing_sites.txt`; every access of the 143 functions holding
+them keeps its check. That build is NOT yet measured. The runtime logs `[tso]` lines with the
+fault rate and top sites (`GOW3_TSO_SITES=<file>` dumps all); add new hot sites to the list.
+`GOW3_GUEST_TSO_CHECKS=1 python3 tools/generate_build_ninja.py ...` restores every check.

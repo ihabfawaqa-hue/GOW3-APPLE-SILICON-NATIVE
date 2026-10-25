@@ -32,6 +32,7 @@ void recomp_set_current_ctx(GuestContext *ctx) {
 }
 
 static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
+  if (sig == SIGBUS && tso_crossing_fixup(ucontext)) return;
   if ((sig == SIGSEGV || sig == SIGBUS) &&
       ps4_gow3gpu_dispatch_fault(ucontext, si ? si->si_addr : NULL)) {
     return;
@@ -307,6 +308,7 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
   sigaction(SIGBUS, &sa, NULL);
   sigaction(SIGTRAP, &sa, NULL);
   sigaction(SIGILL, &sa, NULL);
+  tso_crossing_start_report();
 
   // Dynamic memory size calculation without hardcoded limits
   if (guest_mem_sz == 0) {

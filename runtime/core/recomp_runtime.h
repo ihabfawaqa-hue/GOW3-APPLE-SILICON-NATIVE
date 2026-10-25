@@ -40,6 +40,9 @@ uint64_t recomp_tls_block_offset(const GuestContext *ctx);
 void recomp_setup_entry_args(GuestContext *ctx, int argc, char **argv, uint64_t entry_addr);
 void recomp_dispatch_external(GuestContext *ctx, uint64_t target);
 bool recomp_pc_in_guest_code(uint64_t pc);
+// Guest accesses crossing 16 bytes (tso_crossing.c): handles the SIGBUS of one, starts the log.
+bool tso_crossing_fixup(void *ucontext);
+void tso_crossing_start_report(void);
 void shim_guest_nonlocal_jump(GuestContext *ctx);
 void shim_guest_cxa_throw(GuestContext *ctx);
 void recomp_free_runtime(GuestContext *ctx);

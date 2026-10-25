@@ -1,6 +1,7 @@
 #include "ps4_semaphore.h"
 #include <errno.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -520,9 +521,95 @@ typedef struct {
   int32_t max_count;
   uint32_t attr;
   int num_waiters;
+  int multi_waiters;       // waiters needing more than one unit (they need the broadcast)
+  uint64_t last_signal_ns; // GOW3_SEMA_STATS: when the count last rose
   pthread_mutex_t mutex;
   pthread_cond_t cond;
 } RecompKernelSema;
+
+// GOW3_SEMA_STATS=1: every 5 s, how many waits blocked and how long a blocked waiter took to
+// run after the signal that satisfied it (the wake-up latency the signalling thread waits out
+// when it then waits for that work), over all kernel semaphores.
+static int g_sema_stats = -1;
+static uint64_t g_sema_blocked, g_sema_wake_ns, g_sema_wake_max, g_sema_buckets[4], g_sema_report;
+static pthread_mutex_t g_sema_stats_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t sema_now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static int sema_stats_on(void) {
+  if (g_sema_stats < 0) {
+    const char *env = getenv("GOW3_SEMA_STATS");
+    g_sema_stats = env && env[0] == '1';
+  }
+  return g_sema_stats;
+}
+
+// GOW3_SEMA_SPIN_US (default 40, 0 = off): how long a waiter watches the count before it
+// blocks. Waking a blocked thread took 30-120 us on average in gameplay (milliseconds when no core
+// was free), ~17 times a frame for God of War III's job workers, while the main thread spun on
+// their results. The watch uses ldaxr+wfe: the core sleeps until the count's cache line is
+// written (macOS also wakes wfe every ~1 us), so it costs little power.
+static int64_t g_sema_spin_ns = -1;
+static uint64_t g_sema_spin_hits;
+
+static int64_t sema_spin_ns(void) {
+  if (g_sema_spin_ns < 0) {
+    const char *env = getenv("GOW3_SEMA_SPIN_US");
+    g_sema_spin_ns = (env ? strtoll(env, NULL, 10) : 40) * 1000;
+    if (g_sema_spin_ns < 0) g_sema_spin_ns = 0;
+  }
+  return g_sema_spin_ns;
+}
+
+// Watches `count` until it reaches `need` or `ns` pass; returns whether it did.
+static int sema_watch(volatile int32_t *count, int32_t need, int64_t ns) {
+  const uint64_t deadline = sema_now_ns() + (uint64_t)ns;
+  do {
+    int32_t v;
+#if defined(__aarch64__) || defined(__arm64__)
+    __asm__ volatile("ldaxr %w0, [%1]" : "=r"(v) : "r"(count) : "memory");
+    if (v >= need) {
+      __asm__ volatile("clrex" ::: "memory");
+      return 1;
+    }
+    __asm__ volatile("wfe" ::: "memory");
+#else
+    v = __atomic_load_n(count, __ATOMIC_ACQUIRE);
+    if (v >= need) return 1;
+#endif
+  } while (sema_now_ns() < deadline);
+#if defined(__aarch64__) || defined(__arm64__)
+  __asm__ volatile("clrex" ::: "memory");
+#endif
+  return 0;
+}
+
+static void sema_note_wake(uint64_t signal_ns) {
+  const uint64_t now = sema_now_ns(), ns = signal_ns && now > signal_ns ? now - signal_ns : 0;
+  pthread_mutex_lock(&g_sema_stats_lock);
+  ++g_sema_blocked;
+  g_sema_wake_ns += ns;
+  if (ns > g_sema_wake_max) g_sema_wake_max = ns;
+  ++g_sema_buckets[ns < 10000 ? 0 : ns < 50000 ? 1 : ns < 200000 ? 2 : 3];
+  if (now - g_sema_report >= 5000000000ull) {
+    if (g_sema_report) {
+      fprintf(stderr, "[sema] %llu waits caught by the watch, %llu blocked in 5 s; wake latency "
+                      "mean %.1f us, max %.1f us; <10us %llu, <50us %llu, <200us %llu, longer %llu\n",
+              (unsigned long long)g_sema_spin_hits, (unsigned long long)g_sema_blocked,
+              g_sema_blocked ? g_sema_wake_ns / 1e3 / g_sema_blocked : 0.0, g_sema_wake_max / 1e3,
+              (unsigned long long)g_sema_buckets[0], (unsigned long long)g_sema_buckets[1],
+              (unsigned long long)g_sema_buckets[2], (unsigned long long)g_sema_buckets[3]);
+    }
+    g_sema_blocked = g_sema_wake_ns = g_sema_wake_max = g_sema_spin_hits = 0;
+    memset(g_sema_buckets, 0, sizeof(g_sema_buckets));
+    g_sema_report = now;
+  }
+  pthread_mutex_unlock(&g_sema_stats_lock);
+}
 
 static RecompKernelSema g_ksem_table[MAX_KSEMS];
 static pthread_mutex_t g_ksem_table_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -564,6 +651,8 @@ int sceKernelCreateSema(OrbisKernelSema *sem, const char *pName, uint32_t attr, 
   s->current_count = initCount;
   s->attr = attr;
   s->num_waiters = 0;
+  s->multi_waiters = 0;
+  s->last_signal_ns = 0;
   pthread_mutex_init(&s->mutex, NULL);
   pthread_cond_init(&s->cond, NULL);
 
@@ -599,7 +688,17 @@ int sceKernelSignalSema(OrbisKernelSema sem, int32_t signalCount) {
     return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
   }
   s->current_count += signalCount;
-  pthread_cond_broadcast(&s->cond);
+  if (sema_stats_on()) s->last_signal_ns = sema_now_ns();
+  // Wakes as many waiters as units arrived (each needs one), not all of them: God of War III's
+  // job workers wait on one semaphore and a broadcast per job woke all five, four to sleep
+  // again. A waiter needing more than one unit could miss its turn that way: then all wake.
+  if (s->multi_waiters > 0 || signalCount >= s->num_waiters) {
+    pthread_cond_broadcast(&s->cond);
+  } else {
+    for (int32_t i = 0; i < signalCount; i++) {
+      pthread_cond_signal(&s->cond);
+    }
+  }
   pthread_mutex_unlock(&s->mutex);
   return 0;
 }
@@ -622,6 +721,27 @@ int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout
     return 0x8002003c; // ORBIS_KERNEL_ERROR_ETIMEDOUT
   }
 
+  const int64_t spin = sema_spin_ns();
+  if (spin > 0 && !pTimeout) { // a timed wait keeps its exact timeout
+    pthread_mutex_unlock(&s->mutex);
+    const int caught = sema_watch(&s->current_count, needCount, spin);
+    pthread_mutex_lock(&s->mutex);
+    if (s->magic != KSEM_MAGIC) {
+      pthread_mutex_unlock(&s->mutex);
+      return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
+    }
+    if (caught && s->current_count >= needCount) {
+      s->current_count -= needCount;
+      pthread_mutex_unlock(&s->mutex);
+      if (sema_stats_on()) {
+        pthread_mutex_lock(&g_sema_stats_lock);
+        ++g_sema_spin_hits;
+        pthread_mutex_unlock(&g_sema_stats_lock);
+      }
+      return 0;
+    }
+  }
+
   struct timespec ts;
   int has_timeout = 0;
   if (pTimeout) {
@@ -638,11 +758,13 @@ int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout
   }
 
   s->num_waiters++;
+  if (needCount > 1) s->multi_waiters++;
   while (s->magic == KSEM_MAGIC && s->current_count < needCount) {
     if (has_timeout) {
       int rc = pthread_cond_timedwait(&s->cond, &s->mutex, &ts);
       if (rc == ETIMEDOUT) {
         s->num_waiters--;
+        if (needCount > 1) s->multi_waiters--;
         if (pTimeout) {
           *pTimeout = 0;
         }
@@ -655,13 +777,16 @@ int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout
   }
 
   s->num_waiters--;
+  if (needCount > 1) s->multi_waiters--;
   if (s->magic != KSEM_MAGIC) {
     pthread_mutex_unlock(&s->mutex);
     return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
   }
 
   s->current_count -= needCount;
+  const uint64_t signal_ns = s->last_signal_ns;
   pthread_mutex_unlock(&s->mutex);
+  if (sema_stats_on()) sema_note_wake(signal_ns);
   return 0;
 }
 

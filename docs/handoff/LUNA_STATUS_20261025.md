@@ -65,3 +65,24 @@
 3. Reproduce a stripe transition with the diagnostic on.
 4. Profile the VkRecorder heap allocations, the sampler lookup and the submissions per frame.
 5. The 1440p + HiDPI + FSR1 crash in `PrepareFrame`.
+
+## Update (evening): FPS work, audio pitch, quick save, gate ghosting
+
+Gameplay benchmarks now load a throwaway copy of the player's save (Mount Olympus) through
+main menu > Load (`PS4_SAVEDATA_DIALOG_AUTO=0`). Runtime `20261025-151116-c268c9a`.
+
+| Item | Result | State |
+|---|---|---|
+| KosmicKrisp upload-block pool (cap 32 → 1024, `scripts/lab/patches/kosmickrisp-cmd-bo-pool.patch`) | Metal heap creation on the Vulkan recorder 10% → 0%; recorder 84% → 74% busy; one matched pair 35.6 → 36.3 FPS | VERIFIED, installed |
+| Audio pitch/warble in gameplay | Deadline pacing (0312ef0) caused underrun bursts during play (651 after load vs 2 with device pacing); default is device pacing again (`PS4_AUDIO_PACING=deadline` opt-in); no repeated (stale) grains in either mode | VERIFIED by counters; needs the player's ear |
+| Upstream video arena fix (1.25 → 2.25 GiB, pattern-checked, `GOW3_VIDEO_ARENA_PATCH=0` off) | Loads and renders correctly; effect on transition stripes not yet seen | PARTIAL |
+| Quick save F5 / quick load F9 | F5 copies the last checkpoint to QUICKSAVE1 (byte-identical data); the game's Load list shows it and loads it; F9 selects it in the next Load list | VERIFIED |
+| Camera-cut history reset (FSR 3.1) | No false cuts while walking; real cut (the gate attack ghosting) not reached in a driven run | PARTIAL |
+| Copy pool (guest buffer copies off the recorder) | Matched loaded-save windows 45.0 vs 45.2 FPS | No gain, default kept |
+| Main-thread worker spin (`fn_0x1a5d10`) | On the loaded save: ~1 wait per frame, each < 1 ms, ~2% of the main thread; a native override was built and verified, then removed (no measurable benefit) | NOT CHANGED |
+| sceGnmSubmitDone lock (Argon) | Main thread blocks 14.5–19 ms/frame in combat, but the lock is checked only at the next frame's first submit: the game's logic already overlaps; the wait is the GPU command pipeline (~33 ms/frame). Releasing it early would let the game free objects before their fence labels are written (the heap corruption the lock prevents) | NOT CHANGED |
+| 90 FPS (Argon's engine-rate patch) | The M2 Air's display is 60 Hz and the game logic runs at 60 Hz; frames above 60 are never shown on this panel | NOT PURSUED; target 60 |
+
+Frame rate now: 38–45 FPS in the loaded Mount Olympus scene (~800–2,100 draws), 30–36 FPS in the
+New Game opening combat (~2,500–3,100 draws). The limit is the GPU command pipeline (command
+processor, draw recorder and Vulkan recorder each 70–99% busy on four performance cores).

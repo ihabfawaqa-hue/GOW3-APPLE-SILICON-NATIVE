@@ -127,3 +127,20 @@ Library A/B on an idle machine (834-draw view): new 32.8 FPS (20 windows); old 3
 a compute barrier (the intermittent driver-crash family, also seen with the old library at 0x428).
 Machine load matters: with Gemini and assistant_service busy (load average 86) the same build lost
 ~25% FPS.
+
+## Update (after midnight): main-thread profile, runtime 20261026-002350-614833b
+
+Main thread in gameplay (10 s sample): 60% game logic spread over many functions (none above 5%),
+16% spinning in the job wait fn_0x1a5d10, 11% blocked on the submission lock (waiting for the GPU
+pipeline to finish the previous frame), 3-5% handing buffers to draw preparation. Guarded memory
+accesses are only 11.5% of its game-code time. The CPU is oversubscribed (~9 cores of demand on 8)
+and the fanless M2 Air throttles as it heats: the first run after idle is up to 20% faster, so A/Bs
+must alternate (ABBA) and compare warm runs.
+
+Changes (614833b): the job wait sleeps the core with ldaxr+wfe instead of spinning; no
+draw-preparation workers on macOS (GOW3_PREP_WORKERS=4 restores them). About +1.2 FPS (+3%) over
+warm runs, near the noise, with ~2 cores less power drawn.
+
+Next levers, by size: game-code speed on the job workers (the main thread's 16% wait is their
+latency), the GPU pipeline's frame latency (the 11% submission-lock wait), sustained clocks (less
+wasted work = less heat).

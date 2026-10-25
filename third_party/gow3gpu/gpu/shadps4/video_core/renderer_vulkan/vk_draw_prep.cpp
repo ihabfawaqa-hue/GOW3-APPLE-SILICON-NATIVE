@@ -51,9 +51,17 @@ u32 DefaultWorkerCount() {
     if (const char* env = std::getenv("GOW3_PREP_WORKERS")) {
         return static_cast<u32>(std::clamp(std::atoi(env), 0, 16));
     }
+#ifdef __APPLE__
+    // On macOS the workers run at utility QoS, not idle-only: they take cores the game's own
+    // job threads and the GPU pipeline need. On an M2 Air (8 cores, ~9 cores of demand in
+    // gameplay) none was better than four (38.1/38.4 vs 37.2 FPS warm) and saves ~1.8 cores of
+    // power, which a fanless machine gets back as clock speed.
+    return 0;
+#else
     // Workers are SCHED_IDLE and claim whole buffers, so more of them only use more idle
     // cores: half the hardware threads (Steam Deck 4, 16-thread desktop 8).
     return std::clamp<u32>(Gow3Threads::Available() / 2, 1, 8);
+#endif
 }
 
 /// Flattened user data of one submission: chunks never move, so the GPU thread can read a

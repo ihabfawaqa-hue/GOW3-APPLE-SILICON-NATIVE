@@ -33,6 +33,9 @@ writers storing 8 bytes at 4-byte alignment), whose other accesses are likely to
 --keep-tso-checks keeps every check. Each rewritten
 access is labelled and listed with its guest address in __DATA,__gow3_tso for that log.
 
+Some functions get a hand-written body instead (NATIVE_BODIES), with the same entry, exit state
+and memory ordering.
+
 Prints how many instructions were removed.
 """
 import os
@@ -52,6 +55,66 @@ TSO_SLOW = {
     ("store", "dmb ish"): re.compile(r"^(str|strh) +[wx](\d+|zr), \[x28, (x1[67])\]$"),
 }
 TSO_FAST = re.compile(r"^(ldapr|ldaprh|stlr|stlrh) [wx](\d+|zr), \[(x[67])\]$")
+# fn_0x1a5d10 is God of War III's job wait: `loop: cmp dword [rdi], 0 / jne loop`, about 16% of
+# the main thread in gameplay. Spinning keeps a core at full power, which a fanless Mac pays for
+# in clock speed. This waits the ARM way: an exclusive load (acquire, as the original's ldapr, and
+# arming the monitor) and wfe, which sleeps the core until another core writes the flag's line.
+# A flag that is not 4-byte aligned (ldaxr would fault) keeps the original loop. Exit state as
+# the original: w17 = 0, x7 = the flag's host address (aligned case), flags of `cmp w17, #0`.
+NATIVE_BODIES = {
+    "fn_0x1a5d10": """\
+    str x30, [sp, #-16]!
+    tst x24, #3
+    b.ne L_gow3_wait_plain
+    add x7, x28, x24
+L_gow3_wait_load:
+    ldaxr w17, [x7]
+    cbz w17, L_gow3_wait_done
+    wfe
+    b L_gow3_wait_load
+L_gow3_wait_plain:
+    mov x16, x24
+    add x7, x16, #3
+    eor x7, x7, x16
+    tbz x7, #4, L_gow3_wait_ordered
+    ldr w17, [x28, x16]
+    dmb ishld
+    cbz w17, L_gow3_wait_done
+    b L_gow3_wait_yield
+L_gow3_wait_ordered:
+    add x7, x28, x16
+    ldapr w17, [x7]
+    cbz w17, L_gow3_wait_done
+L_gow3_wait_yield:
+    yield
+    b L_gow3_wait_plain
+L_gow3_wait_done:
+    clrex
+    cmp w17, #0
+    ldr x16, [x28, x26]
+    add x26, x26, #8
+    ldr x30, [sp], #16
+    ret
+""",
+}
+
+
+def replace_bodies(lines):
+    """Swaps in NATIVE_BODIES: from a function's label to the next function's .globl."""
+    out, skipping = [], False
+    for line in lines:
+        m = re.match(r"^_(fn_0x[0-9a-f]+):$", line.strip())
+        if skipping and line.startswith(".globl "):
+            skipping = False
+        if m and m.group(1) in NATIVE_BODIES:
+            out += [line, NATIVE_BODIES[m.group(1)], "\n"]
+            skipping = True
+            continue
+        if not skipping:
+            out.append(line)
+    return out
+
+
 SITES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tso_crossing_sites.txt")
 
 
@@ -178,6 +241,7 @@ def main() -> int:
         return 2
     with open(args[0]) as stream:
         lines = [line if line.endswith("\n") else line + "\n" for line in stream]
+    lines = replace_bodies(lines)
     tso_removed = 0
     if not keep_all:
         lines, tso_removed = drop_tso_checks(lines, load_sites())

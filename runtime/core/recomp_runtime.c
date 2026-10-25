@@ -619,6 +619,25 @@ GuestContext *recomp_init_runtime_file(const char *image_filename,
   }
   fclose(fp);
 
+  // God of War III (CUSA01623 v01.02): the video arena holds 0x50000000 (1.25 GiB) at
+  // 0x3cd918. Upstream gow3_pc "Bug Fix - Texture Corruption Fix" raises it to
+  // 0x90000000 (2.25 GiB): the smaller arena overflows when a new stage streams its
+  // textures (corrupted textures). Direct memory here is 32 GiB, above its 2 GiB need.
+  // Applied only where the exact upstream byte pattern is found; GOW3_VIDEO_ARENA_PATCH=0
+  // keeps the original.
+  {
+    static const uint8_t pattern[20] = {0x00, 0x00, 0x00, 0x43, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+                                        0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00};
+    const uint64_t at = 0x3cd910;
+    const char *arena = getenv("GOW3_VIDEO_ARENA_PATCH");
+    if (!(arena && arena[0] == '0') && (uint64_t)sz >= at + sizeof(pattern) &&
+        memcmp(ctx->mem_base + at, pattern, sizeof(pattern)) == 0) {
+      const uint32_t arena_size = 0x90000000u;
+      memcpy(ctx->mem_base + at + 8, &arena_size, sizeof(arena_size));
+      fprintf(stderr, "[ps4-recomp] video arena 1.25 GiB -> 2.25 GiB (texture corruption fix)\n");
+    }
+  }
+
   // PS4_NULL_GUARD=1 makes guest [0, 0x10000) inaccessible, so NULL dereferences fault.
   // Off by default: the C build read zeros there and the acceptance bar is "no worse than
   // the C build"; the eboot's first segment also starts at guest address 0 in some games.

@@ -28,6 +28,19 @@ for path in "$GPU_LIB" "$KK_LIB"; do
     fi
 done
 
+# The driver must be built with the raised command-buffer BO pool (scripts/lab/patches/
+# kosmickrisp-cmd-bo-pool.patch); at the stock 32 it frees and allocates BOs mid-frame.
+# KOSMICKRISP_SKIP_PATCH_CHECK=1 installs a driver whose source tree is not available.
+POOL_HDR="$KK_SOURCE/src/kosmickrisp/vulkan/kk_cmd_pool.h"
+if [ "${KOSMICKRISP_SKIP_PATCH_CHECK:-0}" != "1" ]; then
+    POOL_MAX="$(sed -n 's/^#define KK_CMD_POOL_BO_MAX[[:space:]]*\([0-9]*\).*/\1/p' "$POOL_HDR" 2>/dev/null)"
+    if [ "$POOL_MAX" != "1024" ]; then
+        echo "install_runtime: KK_CMD_POOL_BO_MAX is '${POOL_MAX:-unreadable}' in $POOL_HDR, expected 1024;" >&2
+        echo "  apply scripts/lab/patches/kosmickrisp-cmd-bo-pool.patch and rebuild, or set KOSMICKRISP_SKIP_PATCH_CHECK=1" >&2
+        exit 1
+    fi
+fi
+
 REV="$(git -C "$REPO" rev-parse --short HEAD)"
 DIRTY=""
 if ! git -C "$REPO" diff --quiet -- third_party/gow3gpu runtime; then

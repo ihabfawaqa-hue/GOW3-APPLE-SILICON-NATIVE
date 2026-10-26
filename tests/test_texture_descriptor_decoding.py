@@ -1,9 +1,11 @@
 """Mirror the strict 2D GCN image-descriptor decoder used by the Metal path."""
 
 from pathlib import Path
+import os
 import struct
 
-ASSET_GNF = Path("/Volumes/1TB/gow3_cusa01623_extracted/EXEC/INTRO/BOOT0_00.GNF")
+# Optional: the check against a real texture runs only when GOW3_DIR points at a game dump.
+ASSET_GNF = Path(os.environ.get("GOW3_DIR", "/nonexistent")) / "EXEC/INTRO/BOOT0_00.GNF"
 
 
 def decode_texture_descriptor(dw, num_words=8, mem_size=0x200000000):

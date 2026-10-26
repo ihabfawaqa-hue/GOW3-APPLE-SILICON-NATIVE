@@ -138,6 +138,22 @@ Full tables, loads and caveats: [`docs/engineering/AB_ARGON_20261026.md`](docs/e
   GCN shaders to Vulkan.
 - **Vulkan to Metal.** Mesa's KosmicKrisp Vulkan driver, with the patches in `scripts/lab/patches/`.
 
+## Explore without the game
+
+You can read, build and test large parts of this project without owning or dumping the game:
+
+```bash
+# 14 Python tests (audio metrics, build-graph idempotence, shader translation, replay, trace analysis, ...)
+python3 -m unittest discover -s tests
+
+# the GPU library (shadPS4 video core with the God of War III fixes), arm64
+cmake -S third_party/gow3gpu/gpu -B /tmp/gow3gpu-arm64-build -DCMAKE_BUILD_TYPE=Release -DGOW3_LTO=OFF
+cmake --build /tmp/gow3gpu-arm64-build --parallel 8
+```
+
+The engineering notes in [`docs/`](docs/README.md) are the best starting point: they show how the
+runtime was profiled and tuned, including measurements that disproved several assumptions.
+
 ## Limitations
 
 Be aware of these before you try it:
@@ -233,8 +249,10 @@ file ps4_app                # must report arm64
 ```
 
 Local inputs (kept out of Git by `.gitignore`): `guest_image.bin`, `code_NNN.s` and the generated
-`*_reg.c`, `guest_modules.c`, `dispatch.c`. Your game files go wherever `GOW3_DIR` points
-(default `/Volumes/1TB/gow3_cusa01623_extracted`; override it for your machine).
+`*_reg.c`, `guest_modules.c`, `dispatch.c`. Your game files go wherever `GOW3_DIR` points. Set it
+once in a `local.env` file (`cp local.env.example local.env`, then edit it); Git ignores that file, and
+the launchers, the lab harness and the benchmark scripts all read it. Without it the default is
+`~/GOW3/gow3_cusa01623_extracted`.
 
 Build-time switches, set when running `generate_build_ninja.py`:
 
@@ -311,7 +329,7 @@ The launchers start `ps4_app` borderless fullscreen, write a log of every sessio
 
 | Variable | Meaning |
 |---|---|
-| `GOW3_DIR` / `PS4_APP_DIR` | Root of your extracted game dump |
+| `GOW3_DIR` / `PS4_APP_DIR` | Root of your extracted game dump (set it in `local.env`) |
 | `GOW3_DISPLAY=windowed` | Windowed instead of borderless fullscreen |
 | `GOW3_HIGH_DPI=1` | Retina drawable (off by default; the 1x 1080p path is the measured one) |
 | `GOW3_OUTPUT_RES=2560x1440` | Output resolution (the aspect ratio is preserved) |
@@ -378,9 +396,12 @@ throttles, and background load shifts results by more than most optimizations ga
 | `3rdparty/` | LibAtrac9 and minimp3 |
 | `tools/` | Build-graph generator, peephole optimizer, shader and replay tools, TSO site list |
 | `scripts/lab/` | Smoke-run, profiling and runtime-install tooling, and the Mesa patches |
-| `docs/` | Engineering notes, decisions, profiling reports, handoffs |
+| `docs/` | Engineering notes, decisions, profiling reports, handoffs ([index](docs/README.md)) |
 | `tests/` | Python and C regression tests |
-| `assets/` | README artwork |
+| `assets/` | README banner, architecture diagram and the GitHub social preview image |
+| `.github/` | Issue and pull request templates, and the test workflow |
+| `CONTRIBUTING.md`, `LICENSE` | How to contribute; GPL-2.0 license text |
+| `local.env.example` | Template for your machine-specific settings (copy to `local.env`) |
 
 ## Documentation
 

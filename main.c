@@ -20,12 +20,11 @@ static const char *get_game_path(void) {
     if (env && *env) return env;
     env = getenv("PS4_APP_DIR");
     if (env && *env) return env;
-    if (access("/Volumes/1TB/gow3_cusa01623_extracted", F_OK) == 0) return "/Volumes/1TB/gow3_cusa01623_extracted";
     if (access("gow3_cusa01623_extracted", F_OK) == 0) return "gow3_cusa01623_extracted";
     if (access("../gow3_cusa01623_extracted", F_OK) == 0) return "../gow3_cusa01623_extracted";
     if (access("./game", F_OK) == 0) return "./game";
     if (access("./app0", F_OK) == 0) return "./app0";
-    return "/Volumes/1TB/gow3_cusa01623_extracted";
+    return "gow3_cusa01623_extracted";
 }
 
 // Guest code runs on a secondary host thread so the host main thread stays free

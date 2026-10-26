@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Please do not ask for game files
+    url: https://github.com/ihabfawaqa-hue/gow3-arm64-runtime-int#readme
+    about: This project ships no game files and will not help obtain them. See the README.

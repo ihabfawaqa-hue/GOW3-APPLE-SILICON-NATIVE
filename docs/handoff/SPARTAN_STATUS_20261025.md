@@ -2,7 +2,7 @@
 
 ## Scope and repository state
 
-- Repository: `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`
+- Repository: `<repo>`
 - Branch: `sol/spartan-profile-attribution`
 - Starting revision: `8f375b5e3c79a7b525659f159017b6f779666902`
 - Production checkout was not modified. Game assets remained read-only.

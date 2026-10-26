@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b0d12"/><stop offset="0.55" stop-color="#1a1118"/><stop offset="1" stop-color="#3a0f14"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff5a45"/><stop offset="1" stop-color="#ffb347"/></linearGradient>
+    <radialGradient id="glow" cx="0.8" cy="0.4" r="0.6"><stop offset="0" stop-color="#ff5a45" stop-opacity="0.38"/><stop offset="1" stop-color="#ff5a45" stop-opacity="0"/></radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#fff" stroke-opacity="0.04"/></pattern>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/><rect width="1280" height="640" fill="url(#grid)"/><rect width="1280" height="640" fill="url(#glow)"/>
+  <g transform="translate(860 110)" fill="none" stroke="url(#accent)" stroke-width="4">
+    <rect x="30" y="30" width="300" height="300" rx="42"/>
+    <rect x="90" y="90" width="180" height="180" rx="24" stroke-opacity="0.7"/>
+    <g stroke-linecap="round" stroke-opacity="0.85">
+      <path d="M100 0v30M180 0v30M260 0v30M100 330v30M180 330v30M260 330v30"/>
+      <path d="M0 100h30M0 180h30M0 260h30M330 100h30M330 180h30M330 260h30"/>
+    </g>
+    <text x="180" y="196" text-anchor="middle" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="62" font-weight="800" fill="url(#accent)" stroke="none">ARM64</text>
+  </g>
+  <text x="80" y="200" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="34" font-weight="500" fill="#c9ced8" letter-spacing="8">GOD OF WAR III REMASTERED</text>
+  <text x="76" y="320" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="104" font-weight="800" fill="#fff">Native</text>
+  <text x="76" y="430" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="104" font-weight="800" fill="#fff">Apple Silicon</text>
+  <rect x="80" y="456" width="230" height="7" rx="3.5" fill="url(#accent)"/>
+  <text x="80" y="520" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="30" fill="#aab1bf">x86-64 → ARM64 · shadPS4 → Vulkan → Metal</text>
+  <text x="80" y="570" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="22" fill="#7b8294">Experimental · no emulator · no Rosetta · no game files included</text>
+</svg>

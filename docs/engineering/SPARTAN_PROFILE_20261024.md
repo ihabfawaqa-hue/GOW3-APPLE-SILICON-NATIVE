@@ -22,7 +22,7 @@ Date: 2026-10-24. This is a diagnostic milestone, not an accepted performance im
 ## Recovered GPU accounting
 
 Source: Claude's existing `mst1.trace` and `mst1_gpu.xml`, in the local scratchpad
-`/private/tmp/claude-501/-Users-ihabfawaqa/f4bde0d9-acdd-4e7d-891a-a3e9cc509fe8/scratchpad/`.
+`<local scratch directory>/`.
 The new analyzer uses active interval unions and filters ownership by process. It does
 not add vertex and fragment intervals where they overlap.
 

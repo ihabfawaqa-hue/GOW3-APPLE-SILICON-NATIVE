@@ -8,10 +8,10 @@ small image with black bars around it**, now fixed (section 3).
 
 | What | Where |
 |---|---|
-| Working repository (git worktree) | `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `sol/spartan-profile-attribution` |
+| Working repository (git worktree) | `<repo>`, branch `sol/spartan-profile-attribution` |
 | Latest commits | see `git log -3`; local only, nothing pushed |
-| Production checkout (do not touch) | `/Users/ihabfawaqa/Downloads/gow3-arm64` |
-| Game assets (read-only NTFS, never modify or upload) | `/Volumes/1TB/gow3_cusa01623_extracted` (CUSA01623) |
+| Production checkout (do not touch) | `<production checkout>` |
+| Game assets (read-only NTFS, never modify or upload) | `$GOW3_DIR` (CUSA01623) |
 | Launcher for the user | `./Launch_GOW3_Vulkan.command` (in the repo) |
 | Installed GPU runtime (versioned, `current` symlink) | `~/Library/Application Support/GOW3Lab/runtime/` |
 | Benchmark run folders (logs, frame dumps) | `~/Library/Application Support/GOW3Lab/runs/run_*` |

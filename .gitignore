@@ -31,3 +31,6 @@ __pycache__/
 /ps4_app.tso_off
 /docs/handoff/bench/bench_*.csv
 /docs/handoff/bench/bench_*.png
+
+# Machine-specific settings.
+/local.env

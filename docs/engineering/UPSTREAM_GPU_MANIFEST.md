@@ -1,6 +1,6 @@
 # Upstream GPU import manifest
 
-Updated: 2026-10-24. The current isolated integration branch is `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int`, branch `luna/gow3-runtime-integration`, at memory-contract commit `4a96b41` after `90f6318` and `0a7642e`. The production `ps4_app` still does not load or link the candidate GPU; it continues to use the custom Metal path.
+Updated: 2026-10-24. The current isolated integration branch is `<repo>`, branch `luna/gow3-runtime-integration`, at memory-contract commit `4a96b41` after `90f6318` and `0a7642e`. The production `ps4_app` still does not load or link the candidate GPU; it continues to use the custom Metal path.
 
 ## Source and provenance
 
@@ -47,16 +47,16 @@ The candidate-specific NOP smoke first failed because submit-done returned befor
 
 ## Vulkan evidence on Apple M2
 
-KosmicKrisp, built from Mesa revision `09a9fae26d5df276a23b3f66050cd0d1d227800a`, passes the tested source-derived feature/device creation gate, swapchain presentation, storage-image compute/readback, offscreen barriers/readback, image-allocation aliasing, and view reinterpretation. The standalone presenter also initializes. The report and build logs are under `/Users/ihabfawaqa/Library/Application Support/GOW3Lab/runs/vulkan_20261023_kosmickrisp_m2/`.
+KosmicKrisp, built from Mesa revision `09a9fae26d5df276a23b3f66050cd0d1d227800a`, passes the tested source-derived feature/device creation gate, swapchain presentation, storage-image compute/readback, offscreen barriers/readback, image-allocation aliasing, and view reinterpretation. The standalone presenter also initializes. The report and build logs are under `~/Library/Application Support/GOW3Lab/runs/vulkan_20261023_kosmickrisp_m2/`.
 
 D16S8 and D24S8 are unsupported by the probed device; D32S8 is supported. Guest depth conversion, sampling, stencil behavior, and readback through that fallback are not tested. This is a bounded host capability pass, not a GoW3 rendering pass.
 
-MoltenVK 1.4.2 passes diagnostic presentation and readback cases but fails strict pinned renderer device creation because `robustBufferAccess2` and `nullDescriptor` are missing. No feature-bit bypass is accepted. Its report is `/Users/ihabfawaqa/Library/Application Support/GOW3Lab/runs/vulkan_20261023_moltenvk_m2/vulkan_moltenvk.json`.
+MoltenVK 1.4.2 passes diagnostic presentation and readback cases but fails strict pinned renderer device creation because `robustBufferAccess2` and `nullDescriptor` are missing. No feature-bit bypass is accepted. Its report is `~/Library/Application Support/GOW3Lab/runs/vulkan_20261023_moltenvk_m2/vulkan_moltenvk.json`.
 
 ## Production boundary and latest game evidence
 
 The primary call graph still routes `shim_sceGnmSubmitCommandBuffers(GuestContext*)` to `ps4_gnm_metal_process_command_buffers`; `ps4_gnm_metal_present` owns presentation. The placeholder `gpu/gow3gpu_bridge.cpp` forwards back to Metal and is not the imported backend. The candidate `gow3gpu_resolve(const char *scoped_nid)` returns PS4_SYSV HLE function addresses, so it cannot be cast to the primary runtime's `GuestContext*` shim. The submit-specific adapter has been exercised synthetically, but no application call site invokes it.
 
-The latest bounded production run is `run_20261024_045419_457869`; it reports `native-metal`. Screenshots show the Sony card at sample 30 and Santa Monica Studio at 480. At sample 900 the output becomes a black/white split and remains unchanged through 1290; that final image SHA-256 exactly matches the previous production run's same-index frame. The verified 139-file export is `/Users/ihabfawaqa/Downloads/GOW3-smoke-run-20261024-045419/`. The EOP ordering/clock fixes did not restore a recognizable scene. These production screenshots are separate from the candidate runtime bridge and do not demonstrate shadPS4 execution.
+The latest bounded production run is `run_20261024_045419_457869`; it reports `native-metal`. Screenshots show the Sony card at sample 30 and Santa Monica Studio at 480. At sample 900 the output becomes a black/white split and remains unchanged through 1290; that final image SHA-256 exactly matches the previous production run's same-index frame. The verified 139-file export is `~/Downloads/GOW3-smoke-run-20261024-045419/`. The EOP ordering/clock fixes did not restore a recognizable scene. These production screenshots are separate from the candidate runtime bridge and do not demonstrate shadPS4 execution.
 
 Do not promote the candidate until the runtime installs its memory and host-service contracts, routes typed GNM imports, establishes one GPU completion/event owner and one VideoOut presenter, and passes a real bounded guest workload with safe teardown.

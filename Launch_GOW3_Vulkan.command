@@ -7,7 +7,10 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 export MTL_HUD_ENABLED="${MTL_HUD_ENABLED:-1}"
 cd "$DIR"
 
-export GOW3_DIR="${GOW3_DIR:-/Volumes/1TB/gow3_cusa01623_extracted}"
+# Machine-specific settings (the game directory) live in local.env, which Git ignores:
+# copy local.env.example to local.env and edit it.
+if [ -f "$DIR/local.env" ]; then . "$DIR/local.env"; fi
+export GOW3_DIR="${GOW3_DIR:-$HOME/GOW3/gow3_cusa01623_extracted}"
 export PS4_APP_DIR="${PS4_APP_DIR:-$GOW3_DIR}"
 export PS4_STALL_WATCHDOG="${PS4_STALL_WATCHDOG:-3000}"
 export PS4_SCREENSHOT_DIR="${PS4_SCREENSHOT_DIR:-./screenshots}"

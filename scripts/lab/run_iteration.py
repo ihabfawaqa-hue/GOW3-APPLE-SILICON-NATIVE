@@ -34,7 +34,20 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_RUNS_DIR = Path.home() / "Library/Application Support/GOW3Lab/runs"
 RUNS_DIR = Path(os.environ.get("GOW3_LAB_RUNS", DEFAULT_RUNS_DIR)).expanduser().resolve()
-DEFAULT_ASSETS = Path("/Volumes/1TB/gow3_cusa01623_extracted")
+def _default_assets():
+    """GOW3_DIR from the environment, else from local.env, else ~/GOW3/gow3_cusa01623_extracted."""
+    if os.environ.get("GOW3_DIR"):
+        return Path(os.environ["GOW3_DIR"]).expanduser()
+    local = BASE_DIR / "local.env"
+    if local.is_file():
+        for line in local.read_text().splitlines():
+            m = re.match(r'\s*(?:export\s+)?GOW3_DIR=["\']?([^"\']+)["\']?\s*$', line)
+            if m:
+                return Path(os.path.expandvars(m.group(1))).expanduser()
+    return Path.home() / "GOW3/gow3_cusa01623_extracted"
+
+
+DEFAULT_ASSETS = _default_assets()
 SOURCE_FILES = [
     "build.ninja", "main.c", "Launch_GOW3.command", "fix_and_resume.sh",
     "runtime/core/recomp_runtime.c",

@@ -6,9 +6,9 @@
 
 ## Working tree and boundaries
 
-- Continue in `/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int` on branch `luna/gow3-runtime-integration`.
-- Production checkout `/Users/ihabfawaqa/Downloads/gow3-arm64` on `luna/operation-spartan` remains unchanged. Keep the opt-in candidate isolated until it passes broader visual and synchronization checks.
-- Game assets are mounted at `/Volumes/1TB/gow3_cusa01623_extracted`. Do not modify, publish, or upload them.
+- Continue in `<repo>` on branch `luna/gow3-runtime-integration`.
+- Production checkout `<production checkout>` on `luna/operation-spartan` remains unchanged. Keep the opt-in candidate isolated until it passes broader visual and synchronization checks.
+- Game assets are mounted at `$GOW3_DIR`. Do not modify, publish, or upload them.
 - The runtime and candidate dylib both build as native `arm64`; Rosetta is not a runtime dependency.
 - `./Launch_GOW3.command` is the launcher. Default graphics stay on the existing Metal implementation. The candidate route is enabled only with `PS4_GOW3GPU_BACKEND=gow3gpu-vulkan`.
 - Keep run artifacts under `~/Library/Application Support/GOW3Lab/` or local Downloads. Do not add captures, raw guest memory, game data, audio mixes, or secrets to Git.
@@ -31,14 +31,14 @@ The run logs report `Unimplemented IT_SET_PREDICATION` from the pinned Liverpool
 
 The local export contains screenshots, bounded logs, JSON summaries, and the primary pass traces (raw framebuffer and guest-memory blobs are excluded):
 
-- [Export README](/Users/ihabfawaqa/Downloads/GOW3-candidate-handoff-20261024/README.md)
-- [Primary run summary](/Users/ihabfawaqa/Downloads/GOW3-candidate-handoff-20261024/primary-run-064805/summary.md)
-- [Primary run stderr](/Users/ihabfawaqa/Downloads/GOW3-candidate-handoff-20261024/primary-run-064805/stderr.log)
-- [Guest display logo PNG](/Users/ihabfawaqa/Downloads/GOW3-candidate-handoff-20261024/primary-run-064805/frames/frame_candidate_display_display_003_1920x1080.png)
-- [Presenter-stage PNG](/Users/ihabfawaqa/Downloads/GOW3-candidate-handoff-20261024/primary-run-064805/frames/frame_candidate_output_output_003_1710x961.png)
-- [Pass trace 3](/Users/ihabfawaqa/Downloads/GOW3-candidate-handoff-20261024/primary-run-064805/gpu-captures/frame_20261024-094815_3.txt)
-- [Latest repeat summary](/Users/ihabfawaqa/Downloads/GOW3-candidate-handoff-20261024/latest-repeat-065405/summary.md)
-- [Export checksums](/Users/ihabfawaqa/Downloads/GOW3-candidate-handoff-20261024/SHA256SUMS.txt)
+- [Export README](GOW3-candidate-handoff-20261024/README.md)
+- [Primary run summary](GOW3-candidate-handoff-20261024/primary-run-064805/summary.md)
+- [Primary run stderr](GOW3-candidate-handoff-20261024/primary-run-064805/stderr.log)
+- [Guest display logo PNG](GOW3-candidate-handoff-20261024/primary-run-064805/frames/frame_candidate_display_display_003_1920x1080.png)
+- [Presenter-stage PNG](GOW3-candidate-handoff-20261024/primary-run-064805/frames/frame_candidate_output_output_003_1710x961.png)
+- [Pass trace 3](GOW3-candidate-handoff-20261024/primary-run-064805/gpu-captures/frame_20261024-094815_3.txt)
+- [Latest repeat summary](GOW3-candidate-handoff-20261024/latest-repeat-065405/summary.md)
+- [Export checksums](GOW3-candidate-handoff-20261024/SHA256SUMS.txt)
 
 Original full local runs remain at `~/Library/Application Support/GOW3Lab/runs/run_20261024_064805_480945/` and `.../run_20261024_065405_105444/`, including raw dumps excluded from the export. Those files may contain proprietary derived game data; keep them local.
 

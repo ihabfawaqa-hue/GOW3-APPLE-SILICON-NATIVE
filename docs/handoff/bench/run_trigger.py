@@ -1,7 +1,7 @@
 """Run a bounded candidate session and fire pass-trace/frame-dump triggers at given times."""
 import os, subprocess, sys, time
 from pathlib import Path
-repo = "/Users/ihabfawaqa/Downloads/gow3-arm64-runtime-int"
+repo = str(Path(__file__).resolve().parents[3])
 runs = Path.home() / "Library/Application Support/GOW3Lab/runs"
 secs = sys.argv[1]; times = [float(t) for t in sys.argv[2].split(",")]
 extra_env = dict(a.split("=", 1) for a in sys.argv[3:] if "=" in a)

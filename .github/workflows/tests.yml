@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python-tests:
+    # The tests are plain Python and need no game files, GPU or Vulkan driver.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        # Submodules are not needed for these tests.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run the test suite
+        run: python3 -m unittest discover -s tests -v

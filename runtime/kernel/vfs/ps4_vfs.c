@@ -23,9 +23,6 @@ static char *discover_app_root(const char *hint) {
         if (realpath(env, resolved) != NULL) return strdup(resolved);
         return strdup(env);
     }
-    if (access("/Volumes/1TB/gow3_cusa01623_extracted", F_OK) == 0) {
-        return strdup("/Volumes/1TB/gow3_cusa01623_extracted");
-    }
     if (env && *env && access(env, F_OK) == 0) {
         char resolved[1024];
         if (realpath(env, resolved) != NULL) {

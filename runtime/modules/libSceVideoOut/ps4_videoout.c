@@ -12,6 +12,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <mach/mach_time.h>
 
 __attribute__((weak)) int ps4_gnm_metal_present(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
                           uint32_t tiling_mode, uint32_t pixel_format, void (*on_done)(void *), void *arg) {
@@ -104,12 +105,24 @@ static uint64_t get_fake_tsc(void) {
 
 static void *vblank_thread_func(void *arg) {
     (void)arg;
-    struct timespec ts;
-    ts.tv_sec = 0;
-    ts.tv_nsec = 16666666L; // ~60 Hz (16.666 ms)
+    // Absolute deadlines: a relative sleep adds each tick's own work and wake latency to the period
+    // and drifts 1-3% slow against CoreAudio's wall-clock 48 kHz. Slot N is start + N * 1/60 s.
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    const uint64_t period_abs = (uint64_t)(1000000000.0 / 60.0) * tb.denom / tb.numer;
+    uint64_t next_abs = mach_absolute_time() + period_abs;
+    const int vblank_log = getenv("PS4_VBLANK_LOG") != NULL; // wall time per 600 ticks: expect 10.000 s
+    const uint64_t log_start_abs = mach_absolute_time();
+    uint64_t ticks = 0;
 
     while (g_vblank_thread_running) {
-        nanosleep(&ts, NULL);
+        mach_wait_until(next_abs);
+        next_abs += period_abs;
+        if (vblank_log && ++ticks % 600 == 0)
+            fprintf(stderr, "[vblank] %llu ticks in %.3f s\n", (unsigned long long)ticks,
+                    (double)(mach_absolute_time() - log_start_abs) * tb.numer / tb.denom / 1e9);
+        const uint64_t now_abs = mach_absolute_time();
+        if (now_abs > next_abs + 4 * period_abs) next_abs = now_abs + period_abs; // suspended: resync
 
         pthread_mutex_lock(&g_video_table_mutex);
         for (int i = 0; i < MAX_VIDEO_HANDLES; i++) {

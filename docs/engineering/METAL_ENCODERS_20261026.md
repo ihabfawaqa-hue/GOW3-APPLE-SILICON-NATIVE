@@ -45,3 +45,43 @@ the trace), not flips. At 38 encoders/frame there is no large encoder-count prob
 
 Neither submits (~3/frame) nor encoders (~38/frame) is large. The expected "+4-7 FPS" from cutting
 ~65 submits to <12 and ~250 encoders to <45 does not apply to this build.
+
+## Follow-up: which draws force the splits
+
+`KK_ENCODER_TRACE=1` also counts why each draw would unroll (`kk_unroll_trace`, same patch).
+Over 2,300,000 draws (13,668 flips; 1.76 M indexed, 0 indirect):
+
+| Topology | Draws | Unrolled |
+|---|---|---|
+| prim 4 (triangle list) | 2,155,640 | 0 |
+| prim 5 (triangle strip) | 70,364 | 0 |
+| prim 14 (patch list) | 73,996 | tessellated, 5.4 per flip |
+
+Triangle fans, 8-bit indices, restart, robustness and flat-shading unrolls: all zero. **Tessellation
+is the only thing that forces compute.** That is the 5.1 forced render-encoder splits per flip, and
+the ~25 libkk kernel dispatches per flip (heap clear, VS/TCS launch, tessellator).
+
+## Upper bound on a fix
+
+`KK_SKIP_TESS=1` (diagnostic, wrong picture) drops tessellated draws. Matched 726-draw scene,
+250 s runs, 300 gameplay flips each, machine NOT idle (load average 4-10, so noisy; medians are
+quantized at 33.3 ms):
+
+| Run | Mean FPS |
+|---|---|
+| control | 30.0 |
+| skip tess | 33.4, 32.5 |
+
+About +2.5 to +3.4 FPS is the ceiling for removing all tessellation work and its splits together;
+the split cost alone is smaller. A first control run landed in a different scene (1,625 draws,
+13.8 FPS) and is not comparable.
+
+## Can the splits shrink?
+
+Not cheaply. Each tessellated draw needs compute (VS, TCS, tessellator) before its render work, so
+a split per draw is inherent to KosmicKrisp's emulation. The only structural fix is batching:
+run the compute stage of several consecutive patch draws in one compute encoder, then restart
+the render pass once. That is valid only if the batched draws' compute inputs do not depend on
+rendering done in between, which the driver cannot assume. Worth about 2-3 FPS at most, at
+the price of a driver reordering change. Not pursued. Repeat the A/B on an idle machine before
+revisiting.

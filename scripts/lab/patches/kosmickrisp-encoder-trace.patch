@@ -137,3 +137,95 @@ index 46dfa33..395e66e 100644
  void cs_end(struct kk_cmd_buffer *cmd);
  void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
                                          uint64_t addr);
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 8f627aa..5f03645 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -11,6 +11,10 @@
+ 
+ #include "kk_buffer.h"
+ #include "kk_cmd_buffer.h"
++
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
+ #include "kk_format.h"
+ #include "kk_image_view.h"
+ #include "kk_physical_device.h"
+@@ -1829,9 +1833,61 @@ requires_unroll_flatshade(struct kk_cmd_buffer *cmd,
+    return !data->flatshade_first && fs && fs->info.fs.uses_flat_varyings;
+ }
+ 
++/* KK_ENCODER_TRACE=1: why draws unroll (and so force a compute encoder), by reason and topology.
++ * Reasons are counted independently; a draw can have several. Printed every 20000 draws. */
++static void
++kk_unroll_trace(struct kk_cmd_buffer *cmd, struct kk_draw_command *data, bool tess)
++{
++   static int on = -1;
++   if (on < 0)
++      on = getenv("KK_ENCODER_TRACE") != NULL;
++   if (!on)
++      return;
++   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++   enum { TESS, FAN, PROMO8, PROMO_STRIP, ROBUST, RESTART, FLAT, ANY, N };
++   static const char *names[N] = {"tess", "triangle fan", "8-bit index", "strip w/o restart, <32-bit idx",
++                                  "robustness", "restart", "flatshade (last provoking + flat varyings)",
++                                  "unroll (any)"};
++   static uint64_t draws, reason[N], indexed, indirect, by_prim[32], unrolled_by_prim[32];
++   bool hit[N] = {0};
++   hit[TESS] = tess;
++   if (!tess) {
++      hit[FAN] = data->prim == MESA_PRIM_TRIANGLE_FAN;
++      hit[PROMO8] = data->indexed && data->index_buffer_el_size_B == 1;
++      hit[PROMO_STRIP] = data->indexed && !hit[PROMO8] && !data->restart &&
++                         data->index_buffer_el_size_B < 4 &&
++                         (data->prim == MESA_PRIM_LINE_STRIP || data->prim == MESA_PRIM_TRIANGLE_STRIP);
++      hit[ROBUST] = requires_unroll_robustness(cmd, data);
++      hit[RESTART] = requires_unroll_restart(cmd, data);
++      hit[FLAT] = requires_unroll_flatshade(cmd, data);
++      hit[ANY] = hit[FAN] || requires_unroll_index_promotion(data) || hit[ROBUST] || hit[RESTART] || hit[FLAT];
++   }
++   pthread_mutex_lock(&lock);
++   ++draws;
++   indexed += data->indexed;
++   indirect += data->indirect;
++   by_prim[data->prim & 31]++;
++   if (hit[ANY])
++      unrolled_by_prim[data->prim & 31]++;
++   for (int i = 0; i < N; i++)
++      reason[i] += hit[i];
++   if (draws % 20000 == 0) {
++      fprintf(stderr, "[kk-unroll] %llu draws (%llu indexed, %llu indirect)\n",
++              (unsigned long long)draws, (unsigned long long)indexed, (unsigned long long)indirect);
++      for (int i = 0; i < N; i++)
++         fprintf(stderr, "[kk-unroll]   %-44s %llu\n", names[i], (unsigned long long)reason[i]);
++      for (int p = 0; p < 32; p++)
++         if (by_prim[p])
++            fprintf(stderr, "[kk-unroll]   prim %2d: %llu draws, %llu unrolled\n", p,
++                    (unsigned long long)by_prim[p], (unsigned long long)unrolled_by_prim[p]);
++   }
++   pthread_mutex_unlock(&lock);
++}
++
+ static bool
+ requires_unroll(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+ {
++   kk_unroll_trace(cmd, data, cmd->state.shaders[MESA_SHADER_TESS_EVAL] != NULL);
+    /* No need to unroll for tessellation. Robustness is handled by tessellator,
+     * restart is not supported for patch lists, and flat-shading does not have a
+     * well-defined vertex used when tessellating. */
+@@ -2082,6 +2138,14 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+       if (data->upload_mask)
+          kk_upload_per_draw_data(cmd, data->upload_mask, i, &draw_data);
+ 
++      /* Diagnostic only: KK_SKIP_TESS=1 drops tessellated draws (wrong picture) to bound what the
++       * tessellation compute work and its render splits cost. */
++      static int skip_tess = -1;
++      if (skip_tess < 0)
++         skip_tess = getenv("KK_SKIP_TESS") != NULL;
++      if (tess && skip_tess)
++         continue;
++
+       if (tess)
+          draw_data = kk_launch_tess(cmd, draw_data);
+ 

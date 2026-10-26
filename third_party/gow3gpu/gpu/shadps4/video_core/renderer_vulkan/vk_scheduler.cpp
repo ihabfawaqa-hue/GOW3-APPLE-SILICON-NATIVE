@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <unordered_map>
 #include <thread>
 #include <algorithm>
 #include <execinfo.h>
@@ -619,8 +620,54 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 #endif
 }
 
+namespace {
+/// gow3: GOW3_SUBMIT_TRACE=1 counts vkQueueSubmit calls by call stack and prints the top stacks
+/// (symbolized) every 3000 submissions, to see what splits a frame into many submissions.
+void TraceSubmit() {
+    static const bool enabled = std::getenv("GOW3_SUBMIT_TRACE") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    struct Stack {
+        void* frames[8];
+        int depth;
+        u64 count;
+    };
+    static std::unordered_map<u64, Stack> stacks; // guarded by Scheduler::submit_mutex
+    static u64 total = 0;
+    Stack s{};
+    s.depth = backtrace(s.frames, 8);
+    u64 key = 1469598103934665603ull;
+    for (int i = 1; i < s.depth; ++i) {
+        key = (key ^ reinterpret_cast<u64>(s.frames[i])) * 1099511628211ull;
+    }
+    auto [it, inserted] = stacks.try_emplace(key, s);
+    ++it->second.count;
+    if (++total % 3000 != 0) {
+        return;
+    }
+    std::vector<const Stack*> order;
+    for (const auto& [k, v] : stacks) {
+        order.push_back(&v);
+    }
+    std::sort(order.begin(), order.end(),
+              [](const Stack* a, const Stack* b) { return a->count > b->count; });
+    std::fprintf(stderr, "[submit-trace] %llu submits, %zu distinct stacks\n",
+                 static_cast<unsigned long long>(total), order.size());
+    for (size_t i = 0; i < order.size() && i < 10; ++i) {
+        std::fprintf(stderr, "[submit-trace] %llu x\n", static_cast<unsigned long long>(order[i]->count));
+        char** names = backtrace_symbols(order[i]->frames, order[i]->depth);
+        for (int f = 1; f < order[i]->depth && names; ++f) {
+            std::fprintf(stderr, "[submit-trace]     %s\n", names[f]);
+        }
+        std::free(names);
+    }
+}
+} // namespace
+
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
+    TraceSubmit();
     const u64 signal_value = work_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED

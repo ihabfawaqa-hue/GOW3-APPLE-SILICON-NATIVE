@@ -1,12 +1,19 @@
 # The translator interface
 
 `ps4_app` is built from your own copy of the game's executable, statically translated from x86-64 to
-ARM64. **The translator itself is not part of this repository.** The code refers to it as *PS4Recomp*:
-comments in `runtime/core/recomp_context.h` point at `pkg/lifter` and `pkg/emitter/asm_trampoline.go`, which
-are Go packages of that project (an ELF loader, disassembler, analyzer, lifter and ARM64 emitter). This
-document records what the build expects the translator to produce, so the pipeline can be reproduced or
-reimplemented. Everything below was read from the files this repository consumes; nothing game-specific
-is reproduced here.
+ARM64. The translator is **[PS4Recomp](https://github.com/wie-project/PS4Recomp)** (Go, GPL-2.0; Vladislav
+Kalinkin and the wie-project contributors), included in this repository as the submodule
+`third_party/PS4Recomp`, pinned to commit `dc726c3` (2026-10-22), the upstream version current when this
+project's inputs were generated. Its packages are `pkg/elfloader`, `pkg/disasm`, `pkg/analyzer`,
+`pkg/lifter`, `pkg/emitter`, `pkg/runtime` and `pkg/cli`, with the command in `cmd/ps4-recomp`.
+
+How this was established: comments in `runtime/core/recomp_context.h` and `ps4_syscalls.c` refer to
+`pkg/lifter`, `pkg/emitter/asm_trampoline.go`, `pkg/emitter/context_offsets_test.go` and
+`emitter.ImplementedSyscalls`; the upstream repository has exactly those packages; and every
+non-comment line of this repository's `trampoline_arm64.s` (199 lines) appears in upstream's
+`asm_trampoline.go` at every commit from `c6350d6` (2026-10-22) on, so the tracked trampoline is its
+emitter's output. This document records what the build expects the translator to produce. Everything
+below was read from the files this repository consumes; nothing game-specific is reproduced here.
 
 ```
 game executable (ELF) --> translator --> guest_image.bin
@@ -57,10 +64,10 @@ them. `.gitignore` keeps all of them out of Git, because they are derived from t
 
 ## Reproducing or replacing it
 
-A working translator must emit the files above with those conventions, against the runtime in `runtime/`.
+The translator must emit the files above with those conventions, against the runtime in `runtime/`.
 `tools/generate_build_ninja.py` shows how the generated files are discovered, and
 `tests/test_build_system_idempotence.py` checks that the generated build graph is deterministic.
 
-If you have the original translator, put its output in the repository root (or a directory you pass to
-the build tooling) and follow the README's build steps. If you maintain it as a separate repository, link
-it from the README so others can find it.
+Run the translator on your own dump (see the README's *Building*, step 0), put its output in the
+repository root and follow the remaining build steps. The generation has not been re-run from a clean
+checkout, and the flags used for the shipped inputs were not recorded.

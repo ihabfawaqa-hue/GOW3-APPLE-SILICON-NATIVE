@@ -158,11 +158,14 @@ runtime was profiled and tuned, including measurements that disproved several as
 
 Be aware of these before you try it:
 
-- **You cannot build a working `ps4_app` from a fresh clone yet.** The build needs `guest_image.bin`
-  and `code_NNN.s`, which are produced from your own copy of the game's executable. The translator
-  that produces them (referred to in the code as *PS4Recomp*, a Go project) is not in this repository.
-  [`docs/TRANSLATOR_INTERFACE.md`](docs/TRANSLATOR_INTERFACE.md) documents exactly what it must emit.
-  Everything else in the repository builds.
+- **The guest code must be generated from your own game dump first.** The build needs
+  `guest_image.bin` and `code_NNN.s`, which the translator
+  [PS4Recomp](https://github.com/wie-project/PS4Recomp) (a Go program) produces from your copy of the
+  game's executable. It is included here as a pinned submodule, `third_party/PS4Recomp`. The generation has not been
+  re-run that generation from a clean checkout, and the exact flags used for the shipped inputs were not
+  recorded, so treat the steps under [Building](#building) as unverified end to end. These files are
+  derived from the game, so they are never part of this repository.
+  [`docs/TRANSLATOR_INTERFACE.md`](docs/TRANSLATOR_INTERFACE.md) documents what the build expects.
 - **Heavy scenes are GPU-bound.** In scenes with 2,000+ draws per frame the M2 Air runs about 30 to
   45 FPS. Sustained load also heats a fanless machine, which lowers clocks over time.
 - **Only one machine has been tested:** an M2 MacBook Air with 16 GB. Other chips, other memory sizes
@@ -190,7 +193,8 @@ Be aware of these before you try it:
 > help are listed separately below.
 
 **Packaging and reproducibility**
-- [ ] Add the x86-64 → ARM64 translator (PS4Recomp) or link its repository, so a fresh clone can be built. Its interface is already documented in `docs/TRANSLATOR_INTERFACE.md`.
+- [x] Include the x86-64 → ARM64 translator, PS4Recomp, as a pinned submodule.
+- [ ] Reproduce the guest-code generation end to end from a clean checkout and record the exact translator flags and version.
 - [ ] Persistent build locations for the GPU library and driver (they default to `/tmp`), plus a single
       bootstrap script and a `.app` bundle.
 - [ ] Removal of machine-specific paths from the launchers and docs.
@@ -234,10 +238,39 @@ Three pieces are built separately: the application (`ps4_app`), the GPU library
 the application build needs local inputs this repository does not contain.
 
 ```bash
-git clone --recurse-submodules <this repository's URL>
+git clone --recurse-submodules --shallow-submodules <this repository's URL>
 cd GOW3-APPLE-SILICON-NATIVE
 git submodule update --init --recursive      # if you cloned without --recurse-submodules
 ```
+
+<details>
+<summary><b>0. The guest code (translator)</b></summary>
+
+`ps4_app` runs your game's code translated ahead of time from x86-64 to ARM64. The translator is
+[PS4Recomp](https://github.com/wie-project/PS4Recomp) by Vladislav Kalinkin (GPL-2.0), included as the
+submodule `third_party/PS4Recomp`, pinned to commit `dc726c3`: the upstream version current when this
+project's inputs were generated. `trampoline_arm64.s` in this repository is identical, line for line, to
+the output of that translator's emitter (`pkg/emitter/asm_trampoline.go`), and `hle_report.txt` is its
+report.
+
+```bash
+cd third_party/PS4Recomp
+# needs Go 1.22+ and the Xcode command line tools; see its README for the 3rdparty static libraries
+go build -o ps4-recomp ./cmd/ps4-recomp
+./ps4-recomp analyze /path/to/your/dump/eboot.bin        # report only
+./ps4-recomp /path/to/your/dump/eboot.bin --app-dir /path/to/your/dump -o /tmp/gow3-out
+```
+
+Copy the generated `guest_image.bin`, `code_NNN.s`, `code_NNN_reg.c`, `dispatch.c`, `guest_modules.c`
+and `guest_modules_synth.s` into the repository root; `docs/TRANSLATOR_INTERFACE.md` describes each. The
+translator reads your own decrypted dump and never needs, or ships, game files here.
+
+> [!WARNING]
+> **Not re-run from a clean checkout.** This repository's runtime has been modified since the inputs
+> were generated, and the flags used for them were not recorded (for example the chunk size). Output
+> from a newer upstream version may need changes before it links with this runtime.
+
+</details>
 
 <details>
 <summary><b>1. The application</b></summary>
@@ -390,10 +423,11 @@ throttles, and background load shifts results by more than most optimizations ga
 | Path | Contents |
 |---|---|
 | `main.c`, `trampoline_arm64.s` | Process entry point and the ARM64 guest/host trampolines |
-| `runtime/core` | Guest context, memory, logging, TSO fault fixup, GNM and GPU-library adapters |
+| `runtime/core` | Guest context, memory, logging, TSO fault fixup, GNM and GPU-library adapters (derived from PS4Recomp's `pkg/runtime`) |
 | `runtime/kernel` | Threads, synchronization, event queues, memory, VFS, syscalls |
 | `runtime/modules` | The `libSce*` system modules (video out, audio out, AJM, video decoder, pad, save data, ...) |
 | `third_party/gow3gpu` | Fork of the shadPS4 video core with the God of War III GPU fixes (GPL-2.0) |
+| `third_party/PS4Recomp` | Submodule: the x86-64 → ARM64 translator (Go, GPL-2.0), pinned |
 | `gpu/` | Bridge between the app and `libgow3gpu`, and the GCN shader recompiler snapshot |
 | `3rdparty/` | LibAtrac9 and minimp3 |
 | `tools/` | Build-graph generator, peephole optimizer, shader and replay tools, TSO site list |
@@ -431,6 +465,10 @@ results. Most are CPU-side policy checks; they do not validate rendered output.
 
 This project builds on the work of others:
 
+- **Vladislav Kalinkin** and the **wie-project** contributors: [PS4Recomp](https://github.com/wie-project/PS4Recomp),
+  the macOS Apple Silicon recompiler that translates the game's x86-64 code to ARM64. It is included as a
+  submodule, and `runtime/` here is a modified derivative of its runtime (`pkg/runtime`): all 146 of its
+  runtime source files exist here under the same paths, changed, with 14 more added.
 - **shadPS4 team**: the [shadPS4](https://github.com/shadps4-emu/shadPS4) video core (GCN and PM4
   translation to Vulkan).
 - **cuesta4**: the [God of War III-focused shadPS4 branch](https://github.com/cuesta4/shadPS4/tree/eltutz)
@@ -462,7 +500,8 @@ This project is licensed under the **GNU General Public License, version 2 or (a
 version** (**GPL-2.0-or-later**). The full text is in [`LICENSE`](LICENSE).
 
 It builds on [shadPS4](https://github.com/shadps4-emu/shadPS4) through `third_party/gow3gpu`, which is
-GPL-2.0-or-later, and many source files here carry `SPDX-License-Identifier: GPL-2.0-or-later`. All source
+GPL-2.0-or-later, and on [PS4Recomp](https://github.com/wie-project/PS4Recomp) (GPL-2.0, its sources carry
+`SPDX-License-Identifier: GPL-2.0-or-later`), and many source files here carry `SPDX-License-Identifier: GPL-2.0-or-later`. All source
 headers and bundled notices must be kept when you redistribute it.
 
 Bundled third-party components keep their own licenses:

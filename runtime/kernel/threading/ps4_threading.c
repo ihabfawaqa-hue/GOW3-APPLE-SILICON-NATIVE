@@ -210,6 +210,38 @@ static void guest_worker_apply_qos(const char *name) {
   }
   fprintf(stderr, "[ps4-thread] '%s': QoS 0x%x -> %s (0x%x)\n", name, (unsigned)before, e, (unsigned)cls);
 }
+// PS4_THREAD_QOS="<name prefix>=<class>[,...]": QoS class for any guest thread whose name starts
+// with the prefix (class: default|utility|initiated|interactive), applied after the job-worker
+// rule. Unset changes nothing. Operation Spartan (Argon) finding: more than ten threads at
+// USER_INTERACTIVE oversubscribe the four performance cores of an M2; e.g.
+// PS4_THREAD_QOS="brbDriver=default" moves the audio mixer off them.
+static void guest_thread_apply_qos_rules(const char *name) {
+  const char *rules = getenv("PS4_THREAD_QOS");
+  if (!rules || !rules[0]) return;
+  char buf[256];
+  snprintf(buf, sizeof buf, "%s", rules);
+  char *save = NULL;
+  for (char *rule = strtok_r(buf, ",", &save); rule; rule = strtok_r(NULL, ",", &save)) {
+    char *eq = strchr(rule, '=');
+    if (!eq) continue;
+    *eq = '\0';
+    if (strncmp(name, rule, strlen(rule)) != 0) continue;
+    const char *cls_name = eq + 1;
+    qos_class_t cls;
+    if (strcmp(cls_name, "default") == 0) cls = QOS_CLASS_DEFAULT;
+    else if (strcmp(cls_name, "utility") == 0) cls = QOS_CLASS_UTILITY;
+    else if (strcmp(cls_name, "initiated") == 0) cls = QOS_CLASS_USER_INITIATED;
+    else if (strcmp(cls_name, "interactive") == 0) cls = QOS_CLASS_USER_INTERACTIVE;
+    else {
+      fprintf(stderr, "[ps4-thread] PS4_THREAD_QOS class '%s' unknown for '%s'\n", cls_name, rule);
+      continue;
+    }
+    int err = pthread_set_qos_class_self_np(cls, 0);
+    fprintf(stderr, "[ps4-thread] '%s': PS4_THREAD_QOS %s -> %s%s\n", name, rule, cls_name,
+            err ? " (failed)" : "");
+    return;
+  }
+}
 #endif
 
 static void *recomp_host_thread_runner(void *arg) {
@@ -222,6 +254,7 @@ static void *recomp_host_thread_runner(void *arg) {
 #if defined(__APPLE__)
     pthread_setname_np(t->name);
     guest_worker_apply_qos(t->name);
+    guest_thread_apply_qos_rules(t->name);
 #elif defined(__linux__)
     pthread_setname_np(t->host_thread, t->name);
 #endif

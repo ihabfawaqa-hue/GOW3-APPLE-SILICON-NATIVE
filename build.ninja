@@ -61,7 +61,7 @@ rule link_bin
   command = clang $in $ldflags -o $out
   description = LINK $out
 
-peephole_flags = --keep-tso-checks
+peephole_flags = 
 build main.o: compile_c main.c
 build trampoline_arm64.o: compile_s trampoline_arm64.s
 build code_000.opt.s: peephole_guest code_000.s | tools/peephole_guest_code.py tools/tso_crossing_sites.txt

@@ -27,3 +27,7 @@
 /gow3-update-patch 4/
 .DS_Store
 __pycache__/
+/ps4_app.tso_on
+/ps4_app.tso_off
+/docs/handoff/bench/bench_*.csv
+/docs/handoff/bench/bench_*.png

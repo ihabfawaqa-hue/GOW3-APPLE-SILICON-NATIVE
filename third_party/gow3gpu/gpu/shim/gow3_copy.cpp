@@ -6,6 +6,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -186,7 +187,15 @@ private:
 
     void Loop(unsigned index) {
         Common::SetCurrentThreadName(("gow3:Copy" + std::to_string(index)).c_str());
-        Gow3Threads::MakeCritical();
+        // GOW3_COPY_QOS=initiated puts the copy threads below the four critical threads (Operation
+        // Spartan: ten threads at USER_INTERACTIVE oversubscribe an M2's four performance cores).
+        // The default stays critical: at a lower class the submissions waited 10-30 ms a frame.
+        static const char* copy_qos = std::getenv("GOW3_COPY_QOS");
+        if (copy_qos && std::strcmp(copy_qos, "initiated") == 0) {
+            Gow3Threads::MakeSupporting();
+        } else {
+            Gow3Threads::MakeCritical();
+        }
         u64 seen = 0;
         std::unique_lock lk{mutex};
         while (true) {

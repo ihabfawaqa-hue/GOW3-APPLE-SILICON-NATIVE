@@ -97,3 +97,21 @@ stall window. Compute cannot simply be skipped like a graphics draw (a skipped d
 buffer or image contents), so making it async is a correctness risk for a handful of one-time
 stalls. With the driver pipeline cache the driver part of a repeat compile is also gone. Not
 changed; `Pipeline warm-up` now prints the compute pipeline count.
+
+## Per-draw StageSpecialization cost (Spartan report #7 part 1)
+
+`GOW3_SPEC_STATS=1` prints, with the frame stats, the GPU command thread's time per frame in
+`GetGraphicsPipeline`, `RefreshGraphicsKey`, `GetProgram` and the `StageSpecialization` plus flat
+buffer refresh built for every draw. 13 gameplay windows (1,850-2,300 draws/frame, ~820
+`GetGraphicsPipeline` calls/frame), load average 7.7 at the start (so times are if anything high):
+
+| Per frame | Measured | Report (Stage A) |
+|---|---|---|
+| `GetGraphicsPipeline` | 1.82 ms (worst window 5.68) | 9.4 ms |
+| `RefreshGraphicsKey` | 1.70 ms | |
+| `GetProgram` | 1.26 ms | |
+| `StageSpecialization` + flat buffer | 0.88 ms | |
+
+Memoizing the specialization could save at most 0.88 ms of a 27-33 ms frame (~1 FPS), and the
+specialization compare is what guards against stale permutations. Not done. The report's 9.4 ms
+figure is about five times what this build spends.

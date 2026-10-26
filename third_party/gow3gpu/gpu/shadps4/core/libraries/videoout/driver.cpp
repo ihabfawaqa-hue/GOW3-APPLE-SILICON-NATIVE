@@ -43,6 +43,8 @@ extern std::atomic<u64> g_gow3_compile_ns;
 extern std::atomic<u32> g_gow3_compiles;
 extern std::atomic<u64> g_gow3_capture_ns, g_gow3_async_ns, g_gow3_compile_wait_ns;
 extern std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
+extern std::atomic<u64> g_gow3_getpipe_ns, g_gow3_key_ns, g_gow3_program_ns, g_gow3_spec_ns;
+extern std::atomic<u64> g_gow3_getpipe_calls, g_gow3_prepared_hits, g_gow3_program_calls;
 extern std::atomic<u32> g_gow3_pending_draws;
 } // namespace Vulkan
 
@@ -572,6 +574,19 @@ void VideoOutDriver::Flip(const Request& req) {
                         Gow3Stats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(Gow3Stats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(Gow3Stats::scene_draws.exchange(0)) / frames : 0.0);
+            if (std::getenv("GOW3_SPEC_STATS")) {
+                const double f = frames ? double(frames) : 1.0;
+                std::printf("Spec stats per frame: GetGraphicsPipeline %.2f ms (%.0f calls, %.0f prepared hits), "
+                            "RefreshGraphicsKey %.2f ms, GetProgram %.2f ms (%.0f calls), "
+                            "StageSpecialization+flat buffer %.2f ms\n",
+                            Vulkan::g_gow3_getpipe_ns.exchange(0) / 1e6 / f,
+                            Vulkan::g_gow3_getpipe_calls.exchange(0) / f,
+                            Vulkan::g_gow3_prepared_hits.exchange(0) / f,
+                            Vulkan::g_gow3_key_ns.exchange(0) / 1e6 / f,
+                            Vulkan::g_gow3_program_ns.exchange(0) / 1e6 / f,
+                            Vulkan::g_gow3_program_calls.exchange(0) / f,
+                            Vulkan::g_gow3_spec_ns.exchange(0) / 1e6 / f);
+            }
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();
             Vulkan::Scheduler::ReportPassEnds();

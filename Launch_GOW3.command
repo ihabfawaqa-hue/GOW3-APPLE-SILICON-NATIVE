@@ -1,5 +1,7 @@
 #!/bin/bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# Metal's performance HUD (FPS, frame time, GPU) stays on; MTL_HUD_ENABLED=0 hides it.
+export MTL_HUD_ENABLED="${MTL_HUD_ENABLED:-1}"
 cd "$DIR"
 
 # Keep the known asset path and watchdog defaults while allowing bounded test

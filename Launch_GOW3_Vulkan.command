@@ -3,6 +3,8 @@
 # Silicon). Launch_GOW3.command keeps the default Metal path. Every session's output is
 # also written to a log under GOW3Lab/launcher-logs so a crash leaves evidence behind.
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# Metal's performance HUD (FPS, frame time, GPU) stays on; MTL_HUD_ENABLED=0 hides it.
+export MTL_HUD_ENABLED="${MTL_HUD_ENABLED:-1}"
 cd "$DIR"
 
 export GOW3_DIR="${GOW3_DIR:-/Volumes/1TB/gow3_cusa01623_extracted}"

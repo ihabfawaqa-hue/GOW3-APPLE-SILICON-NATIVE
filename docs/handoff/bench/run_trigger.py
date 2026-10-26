@@ -6,6 +6,7 @@ runs = Path.home() / "Library/Application Support/GOW3Lab/runs"
 secs = sys.argv[1]; times = [float(t) for t in sys.argv[2].split(",")]
 extra_env = dict(a.split("=", 1) for a in sys.argv[3:] if "=" in a)
 env = dict(os.environ,
+    MTL_HUD_ENABLED=os.environ.get("MTL_HUD_ENABLED", "1"),  # Metal performance HUD stays visible
     PS4_GOW3GPU_BACKEND="gow3gpu-vulkan",
     PS4_GOW3GPU_LIBRARY=os.path.expanduser("~/Library/Application Support/GOW3Lab/runtime/current/libgow3gpu.dylib"),
     VK_DRIVER_FILES=os.path.expanduser("~/Library/Application Support/GOW3Lab/runtime/current/kosmickrisp_icd.json"),

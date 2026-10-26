@@ -517,6 +517,11 @@ std::atomic<u64> g_gow3_compile_ns;
 std::atomic<u32> g_gow3_compiles;
 std::atomic<u64> g_gow3_capture_ns, g_gow3_async_ns, g_gow3_compile_wait_ns;
 std::atomic<u64> g_gow3_snapshot_ns, g_gow3_guest_wait_ns;
+// GOW3_SPEC_STATS=1: GPU command thread time per frame in GetGraphicsPipeline, RefreshGraphicsKey
+// (the draw's pipeline key), GetProgram (per stage) and the StageSpecialization it builds for every
+// draw; printed with the frame stats.
+std::atomic<u64> g_gow3_getpipe_ns, g_gow3_key_ns, g_gow3_program_ns, g_gow3_spec_ns;
+std::atomic<u64> g_gow3_getpipe_calls, g_gow3_prepared_hits, g_gow3_program_calls;
 std::atomic<u32> g_gow3_pool_reuses;
 std::atomic<u32> g_gow3_pending_draws;
 namespace {
@@ -533,6 +538,24 @@ struct PhaseTimer {
         active = false;
     }
     ~PhaseTimer() { Stop(); }
+};
+struct SpecTimer {
+    static bool Enabled() {
+        static const bool on = std::getenv("GOW3_SPEC_STATS") != nullptr;
+        return on;
+    }
+    std::atomic<u64>& counter;
+    std::chrono::steady_clock::time_point start{};
+    bool on = Enabled();
+    explicit SpecTimer(std::atomic<u64>& c) : counter(c) {
+        if (on) start = std::chrono::steady_clock::now();
+    }
+    ~SpecTimer() {
+        if (on) {
+            counter += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - start).count());
+        }
+    }
 };
 struct CompileTimer {
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -797,6 +820,8 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared) {
+    SpecTimer getpipe_timer{g_gow3_getpipe_ns};
+    ++g_gow3_getpipe_calls;
     MaybeSavePipelineCache();
     SeedWorkerCaches();
     PublishShaders();
@@ -805,12 +830,18 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     used_prepared = nullptr;
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
+            ++g_gow3_prepared_hits;
             used_prepared = prepared;
             return pipeline;
         }
     }
     sel.draw_indirect_params = params;
-    if (!RefreshGraphicsKey(sel)) {
+    bool key_ok;
+    {
+        SpecTimer key_timer{g_gow3_key_ns};
+        key_ok = RefreshGraphicsKey(sel);
+    }
+    if (!key_ok) {
         if (sel.compilation_pending) {
             ++g_gow3_pending_draws;
         }
@@ -1292,6 +1323,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
+    SpecTimer program_timer{g_gow3_program_ns};
+    ++g_gow3_program_calls;
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
     if (hw_stage == HwStage::Geometry &&
         sel.regs->stage_enable.raw == AmdGpu::ShaderStageEnable::LsHsEsGs &&
@@ -1397,8 +1430,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
+    std::optional<SpecTimer> spec_timer(std::in_place, g_gow3_spec_ns);
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    spec_timer.reset();
 
     size_t perm_idx = program->modules.size();
     u64 perm_hash = HashCombine(params.hash, perm_idx);

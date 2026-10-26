@@ -403,7 +403,13 @@ void shim_sceVideodecCreateDecoder(GuestContext *ctx) {
   }
   avctx->width = (int)width;
   avctx->height = (int)height;
-  avctx->thread_count = 1;
+  // Slice threading only: frame threading would hold output back by thread_count - 1 frames,
+  // and the guest decodes and reads each picture synchronously. Streams without multiple slices
+  // per picture decode single-threaded either way. PS4_VIDEODEC_THREADS=1 restores one thread.
+  avctx->thread_count = 4;
+  const char *threads_env = getenv("PS4_VIDEODEC_THREADS");
+  if (threads_env) avctx->thread_count = atoi(threads_env) > 0 ? atoi(threads_env) : 1;
+  avctx->thread_type = FF_THREAD_SLICE;
   avctx->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
   if (avcodec_open2(avctx, codec, NULL) < 0) {
     avcodec_free_context(&avctx);

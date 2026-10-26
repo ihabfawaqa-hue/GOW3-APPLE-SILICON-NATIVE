@@ -85,3 +85,15 @@ the render pass once. That is valid only if the batched draws' compute inputs do
 rendering done in between, which the driver cannot assume. Worth about 2-3 FPS at most, at
 the price of a driver reordering change. Not pursued. Repeat the A/B on an idle machine before
 revisiting.
+
+## Compute and tessellation shader compiles (Spartan report E.2)
+
+`GetProgram` compiles Compute and `hs_en` (tessellation) shaders synchronously on
+`GpuCommandProcessor` (`vk_pipeline_cache.cpp:1342`); only graphics shaders go to the background
+threads. Pipelines are persisted and re-created by the warm-up on every launch, though: the player's
+cache holds 1,077 graphics pipelines but only **3 compute pipelines**, so the synchronous path only
+runs for a shader seen for the first time ever. Recent gameplay runs show "0 compiles" in every
+stall window. Compute cannot simply be skipped like a graphics draw (a skipped dispatch leaves stale
+buffer or image contents), so making it async is a correctness risk for a handful of one-time
+stalls. With the driver pipeline cache the driver part of a repeat compile is also gone. Not
+changed; `Pipeline warm-up` now prints the compute pipeline count.

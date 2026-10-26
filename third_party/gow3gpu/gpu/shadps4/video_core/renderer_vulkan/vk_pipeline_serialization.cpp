@@ -1312,6 +1312,8 @@ void PipelineCache::PumpWarmUp() {
                 warm.loaded, warm.total.load(),
                 std::chrono::duration<double>(now - warm.started).count(), warm.threads);
     LOG_INFO(Render, "Preloaded {} pipelines in the background", warm.loaded);
+    std::printf("Pipeline warm-up: %zu compute pipelines loaded (compute and tessellation shaders "
+                "never compile in the background)\n", compute_pipelines.size());
     ReportPipelineBinaryCache();
     std::printf("Warm-up profile: reader wall %.3f s, entries %.3f s, shader IO/meta %.3f s, "
                 "modules %.3f s (%u); GPU pump %.3f s, max %.3f ms, gap max %.3f ms, "

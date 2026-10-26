@@ -160,7 +160,9 @@ Be aware of these before you try it:
 
 - **You cannot build a working `ps4_app` from a fresh clone yet.** The build needs `guest_image.bin`
   and `code_NNN.s`, which are produced from your own copy of the game's executable. The translator
-  that produces them is not in this repository yet. Everything else in the repository builds.
+  that produces them (referred to in the code as *PS4Recomp*, a Go project) is not in this repository.
+  [`docs/TRANSLATOR_INTERFACE.md`](docs/TRANSLATOR_INTERFACE.md) documents exactly what it must emit.
+  Everything else in the repository builds.
 - **Heavy scenes are GPU-bound.** In scenes with 2,000+ draws per frame the M2 Air runs about 30 to
   45 FPS. Sustained load also heats a fanless machine, which lowers clocks over time.
 - **Only one machine has been tested:** an M2 MacBook Air with 16 GB. Other chips, other memory sizes
@@ -188,7 +190,7 @@ Be aware of these before you try it:
 > help are listed separately below.
 
 **Packaging and reproducibility**
-- [ ] Document or add the x86-64 → ARM64 translation step so a fresh clone can be built.
+- [ ] Add the x86-64 → ARM64 translator (PS4Recomp) or link its repository, so a fresh clone can be built. Its interface is already documented in `docs/TRANSLATOR_INTERFACE.md`.
 - [ ] Persistent build locations for the GPU library and driver (they default to `/tmp`), plus a single
       bootstrap script and a `.app` bundle.
 - [ ] Removal of machine-specific paths from the launchers and docs.
@@ -233,7 +235,7 @@ the application build needs local inputs this repository does not contain.
 
 ```bash
 git clone --recurse-submodules <this repository's URL>
-cd gow3-arm64-runtime-int
+cd GOW3-APPLE-SILICON-NATIVE
 git submodule update --init --recursive      # if you cloned without --recurse-submodules
 ```
 

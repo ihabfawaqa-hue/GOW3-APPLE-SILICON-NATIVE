@@ -12,6 +12,7 @@ an older statement.
 | [`engineering/DECISIONS.md`](engineering/DECISIONS.md) | What was tried, kept and rejected, and why |
 | [`engineering/BLOCKERS.md`](engineering/BLOCKERS.md) | Verified blockers at the time of writing |
 | [`engineering/TEST_MATRIX.md`](engineering/TEST_MATRIX.md) | What is tested and how |
+| [`TRANSLATOR_INTERFACE.md`](TRANSLATOR_INTERFACE.md) | What the (separate) x86-64 → ARM64 translator must produce |
 
 ## Profiling and performance
 

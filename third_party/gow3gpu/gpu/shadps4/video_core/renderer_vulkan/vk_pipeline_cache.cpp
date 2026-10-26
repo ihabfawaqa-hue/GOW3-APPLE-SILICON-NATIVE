@@ -6,10 +6,13 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <ranges>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include "gow3_threads.h"
 
@@ -401,7 +404,19 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
 
-    auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
+    // gow3: the driver's own pipeline cache persists across launches (GOW3_PIPELINE_CACHE=0 turns
+    // it off); without it KosmicKrisp recompiles every MSL pipeline at each start. The driver
+    // validates the blob header (vendor, device, cache UUID) and ignores data that is not its own.
+    std::vector<char> cache_blob;
+    if (const char* env = std::getenv("GOW3_PIPELINE_CACHE"); !env || std::strcmp(env, "0") != 0) {
+        std::ifstream in(PipelineCachePath(), std::ios::binary);
+        if (in) {
+            cache_blob.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+    }
+    auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique(
+        vk::PipelineCacheCreateInfo{.initialDataSize = cache_blob.size(),
+                                    .pInitialData = cache_blob.empty() ? nullptr : cache_blob.data()});
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
@@ -431,6 +446,70 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 PipelineCache::~PipelineCache() {
     StopWarmUp();
     FinishCompilations();
+    if (cache_save_thread.joinable()) {
+        cache_save_thread.join();
+    }
+    SavePipelineCache();
+}
+
+void PipelineCache::MaybeSavePipelineCache() {
+    // The process can end without running this destructor, so write the cache while the game
+    // runs: once a minute, skipping the write when the cache has not grown.
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_cache_save) {
+        return;
+    }
+    next_cache_save = now + std::chrono::seconds(60);
+    if (cache_save_thread.joinable()) {
+        cache_save_thread.join();
+    }
+    cache_save_thread = std::thread([this] {
+        Common::SetCurrentThreadName("gow3:PipelineCacheSave");
+        SavePipelineCache();
+    });
+}
+
+std::filesystem::path PipelineCache::PipelineCachePath() {
+    return GetUserPath(Common::FS::PathType::ShaderDir) / "vk_pipeline_cache.bin";
+}
+
+void PipelineCache::SavePipelineCache() {
+    if (const char* env = std::getenv("GOW3_PIPELINE_CACHE"); env && std::strcmp(env, "0") == 0) {
+        return;
+    }
+    const vk::Device device = instance.GetDevice();
+    // Pipelines built on the compiler threads went into their own caches. Merge everything into a
+    // scratch cache: the destination of a merge must be externally synchronized, and the GPU
+    // thread keeps creating pipelines in the main cache while a periodic save runs.
+    auto [merged_result, merged] = device.createPipelineCacheUnique({});
+    if (merged_result != vk::Result::eSuccess) {
+        return;
+    }
+    std::vector<vk::PipelineCache> sources{*pipeline_cache};
+    for (auto& worker : worker_pipeline_caches) {
+        sources.push_back(*worker);
+    }
+    if (device.mergePipelineCaches(*merged, sources) != vk::Result::eSuccess) {
+        return;
+    }
+    auto [result, data] = device.getPipelineCacheData(*merged);
+    if (result != vk::Result::eSuccess || data.empty() || data.size() == saved_cache_bytes) {
+        return;
+    }
+    saved_cache_bytes = data.size();
+    const auto path = PipelineCachePath();
+    auto tmp = path;
+    tmp += ".tmp";
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        if (!out) {
+            return;
+        }
+    }
+    std::filesystem::rename(tmp, path, ec);
 }
 
 // gow3: shader/pipeline compile time on the GPU thread, reported by GOW3_FRAME_STATS.
@@ -718,6 +797,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared) {
+    MaybeSavePipelineCache();
     SeedWorkerCaches();
     PublishShaders();
     PublishGraphics();

@@ -3,10 +3,13 @@
 
 #pragma once
 
+#include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <unordered_map>
 #include <shared_mutex>
+#include <thread>
 #include <variant>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -132,6 +135,11 @@ public:
                            AmdGpu::Liverpool* liverpool, u32 sparse_page_shift);
     ~PipelineCache();
 
+    /// Writes the driver pipeline cache (all compiler threads merged) next to the shader dumps.
+    void SavePipelineCache();
+    static std::filesystem::path PipelineCachePath();
+    void MaybeSavePipelineCache();
+
     /// Loads the pipelines of earlier sessions. gow3: called by the presenter once the window
     /// can show a loading screen; `progress(done, total)` follows the pipelines read.
     void WarmUp(const std::function<void(u32 done, u32 total)>& progress = {});
@@ -227,6 +235,9 @@ private:
     std::unique_ptr<AsyncCompiler> compiler, capture_compiler;
     std::vector<vk::UniquePipelineCache> worker_pipeline_caches;
     bool worker_caches_seeded = false;
+    std::chrono::steady_clock::time_point next_cache_save{};
+    size_t saved_cache_bytes = 0;
+    std::thread cache_save_thread;
     /// gow3: GOW3_PARALLEL_WARMUP: WarmUp builds the cached pipelines on these threads.
     struct WarmupPool;
     WarmupPool* warmup_pool = nullptr;

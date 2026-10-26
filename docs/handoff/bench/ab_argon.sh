@@ -2,6 +2,8 @@
 # ab_argon.sh [rounds=2] [cooldown_s=120]: Operation Spartan (Argon) configuration vs control, alternating
 # so heat and background load average out. Run on an idle machine (load average < 2, nothing else open).
 #
+#   old       the previous installed runtime ($GOW3_OLD_RUNTIME, default 20261026-002350-614833b) with the
+#             TSO-on binary: what ran before today's changes
 #   base      guest TSO checks ON  (binary built with GOW3_GUEST_TSO_CHECKS=1), default env
 #   tso_off   guest TSO checks OFF (current default build)
 #   +qos      tso_off + PS4_THREAD_QOS=brbDriver=default, GOW3_COPY_QOS=initiated
@@ -25,7 +27,9 @@ run() {  # tag binary env...
   (cd "$S" && python3 bench_cfg.py "$tag" 250 300 "$LIB" "$@" 2>&1 | sed -n 2p)
   sleep "$cool"
 }
+OLD="$HOME/Library/Application Support/GOW3Lab/runtime/${GOW3_OLD_RUNTIME:-20261026-002350-614833b}"
 for r in $(seq 1 "$rounds"); do
+  [ -d "$OLD" ] && run "old_$r" tso_on "PS4_GOW3GPU_LIBRARY=$OLD/libgow3gpu.dylib" GOW3_PIPELINE_CACHE=0
   run "base_$r"    tso_on  GOW3_X=0
   run "tsooff_$r"  tso_off GOW3_X=0
   run "qos_$r"     tso_off 'PS4_THREAD_QOS=brbDriver=default' GOW3_COPY_QOS=initiated

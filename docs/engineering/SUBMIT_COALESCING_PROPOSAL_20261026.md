@@ -34,16 +34,30 @@ That is ~14 Vulkan pass ends per frame, but SPARTAN_PROFILE_20261024.md counts ~
 ~169 compute/blit Metal encoders per frame. The rest of the split happens inside KosmicKrisp: one
 encoder per copy, dispatch and barrier-induced pass change.
 
-## Proposal
+## Correction: the FlushBarriers skip is not worth doing
 
-1. `FlushBarriers`: skip `EndRendering()` when no barrier touches an image that is a current
-   attachment or an input attachment of the open pass and the barrier is not a
-   framebuffer-local dependency. This is the only Vulkan-side split that scales with scene
-   complexity (4 -> 31 per frame in transitions). Validate with `GOW3_PERF_DIAG` (site count
-   down, "resumed" column unchanged) and a pixel comparison of frame dumps.
-2. Hoist staging-to-device copies ahead of `BeginRendering` (the report's idea) only after (1), and
-   only for the copies `GOW3_PERF_DIAG` shows interrupting a pass.
-3. Count Metal encoders with `GOW3_METAL_PASS_LABELS=1` under xctrace before and after, since the
-   Vulkan pass count does not predict the Metal one.
+The first draft proposed skipping `EndRendering()` in `FlushBarriers`. The `GOW3_PERF_DIAG`
+"resumed" column counts pass ends after which the same pass began again (a true split). Summed
+over the whole 250 s gameplay run:
 
-Not proposed: merging submits (nothing to merge), the report's "58-75 -> <12".
+| Site | Pass ends | Same pass resumed |
+|---|---|---|
+| `vk_runtime.cpp:879` FlushBarriers | 102,226 | 509 (0.5%) |
+| `vk_runtime.cpp:265` CopyAliasImage | 37,581 | 0 |
+| `vk_scheduler.cpp:80` state change | 36,022 | 0 |
+| `vk_object_motion.cpp:126` | 22,015 | 0 |
+| `texture_cache.cpp:1290` | 1,976 | 49 (2.5%) |
+| `vk_scheduler.cpp:638` submit | 10,057 | 14 |
+
+Almost every pass end is followed by a different pass, so removing the end would not merge
+anything. The skip is also unsound: with dynamic rendering a `vkCmdPipelineBarrier2` is not allowed
+inside a render instance, and the barrier cannot be hoisted into already-recorded commands.
+Not implemented.
+
+## What is left
+
+The ~111 render + ~169 compute/blit Metal encoders per frame (SPARTAN_PROFILE_20261024.md) are
+created inside KosmicKrisp, one per copy, dispatch and pass change, far above the ~14 Vulkan pass
+ends per frame. Reducing them means a KosmicKrisp change (encoder reuse across compatible copy and
+compute commands), or fewer copies and dispatches from the game's own command stream. Measure with
+`GOW3_METAL_PASS_LABELS=1` under xctrace before choosing.
